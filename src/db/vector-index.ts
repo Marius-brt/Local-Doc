@@ -86,25 +86,55 @@ export async function ensureVectorIndex(db: Client, dims: number): Promise<void>
     `[localdoc] rebuilding vector table for ${dims}-d embeddings (was ${colType ?? "unknown"})`,
   );
 
+  await rebuildVectorTable(db, dims, { preserveMatchingRows: true });
+}
+
+/**
+ * Recreate `chunk_embeddings` as `F32_BLOB(dims)` and recreate the vector index.
+ * Used when switching embedding models so the index matches the new dimension.
+ */
+export async function rebuildVectorTable(
+  db: Client,
+  dims: number,
+  opts: { preserveMatchingRows?: boolean } = {},
+): Promise<void> {
+  if (dims <= 0) {
+    throw new Error(`invalid embedding dimensions: ${dims}`);
+  }
+
+  const preserve = opts.preserveMatchingRows ?? false;
   await dropVectorArtifacts(db);
 
-  // Rebuild table with the correct F32_BLOB(dims). Keep only rows that already match.
-  await db.executeMultiple(`
-    CREATE TABLE chunk_embeddings_new (
-      chunk_id TEXT PRIMARY KEY NOT NULL,
-      model_id TEXT NOT NULL,
-      dims INTEGER NOT NULL,
-      embedding F32_BLOB(${dims}),
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
-    );
-    INSERT INTO chunk_embeddings_new (chunk_id, model_id, dims, embedding, created_at)
-      SELECT chunk_id, model_id, dims, embedding, created_at
-      FROM chunk_embeddings
-      WHERE dims = ${dims};
-    DROP TABLE chunk_embeddings;
-    ALTER TABLE chunk_embeddings_new RENAME TO chunk_embeddings;
-  `);
+  if (preserve) {
+    await db.executeMultiple(`
+      CREATE TABLE chunk_embeddings_new (
+        chunk_id TEXT PRIMARY KEY NOT NULL,
+        model_id TEXT NOT NULL,
+        dims INTEGER NOT NULL,
+        embedding F32_BLOB(${dims}),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+      );
+      INSERT INTO chunk_embeddings_new (chunk_id, model_id, dims, embedding, created_at)
+        SELECT chunk_id, model_id, dims, embedding, created_at
+        FROM chunk_embeddings
+        WHERE dims = ${dims};
+      DROP TABLE chunk_embeddings;
+      ALTER TABLE chunk_embeddings_new RENAME TO chunk_embeddings;
+    `);
+  } else {
+    await db.executeMultiple(`
+      DROP TABLE IF EXISTS chunk_embeddings;
+      CREATE TABLE chunk_embeddings (
+        chunk_id TEXT PRIMARY KEY NOT NULL,
+        model_id TEXT NOT NULL,
+        dims INTEGER NOT NULL,
+        embedding F32_BLOB(${dims}),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+      );
+    `);
+  }
 
   try {
     await db.execute(`
@@ -116,4 +146,12 @@ export async function ensureVectorIndex(db: Client, dims: number): Promise<void>
   }
 
   await setMeta(db, "vector_dims", String(dims));
+}
+
+/** Current stored vector dimensionality, if known. */
+export async function getVectorDims(db: Client): Promise<number | null> {
+  const meta = await getMeta(db, "vector_dims");
+  if (meta && /^\d+$/.test(meta)) return Number(meta);
+  const colType = await columnType(db, "chunk_embeddings", "embedding");
+  return colType ? parseF32BlobDims(colType) : null;
 }

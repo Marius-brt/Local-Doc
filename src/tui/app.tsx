@@ -10,6 +10,7 @@ import { tryCreateEmbedder } from "../embed/index.ts";
 import { buildContextPack, formatPackMarkdown } from "../pack/format.ts";
 import { hybridSearch } from "../search/hybrid.ts";
 import { ingestTarget } from "../sources/ingest.ts";
+import { reembedChunks } from "../sources/reembed.ts";
 
 type View = "sources" | "query" | "inspect" | "add";
 
@@ -26,6 +27,28 @@ function throwIfBusyAborted(signal: AbortSignal): void {
     err.name = "AbortError";
     throw err;
   }
+}
+
+/** Progress messages that represent a visited page/file (not status summaries). */
+function visitFromProgress(phase: string, message?: string): string | null {
+  if (!message?.trim()) return null;
+  const msg = message.trim();
+  if (phase === "fetch" || phase === "index") {
+    if (/^Fetching \d+ /.test(msg) || msg.startsWith("Discovering") || msg.startsWith("Scanning")) {
+      return null;
+    }
+    return msg;
+  }
+  if (phase === "browser") {
+    const m = msg.match(/https?:\/\/\S+/);
+    return m?.[0] ?? null;
+  }
+  return null;
+}
+
+function formatIngestLog(header: string, status: string, visited: string[]): string {
+  const body = visited.length > 0 ? visited.map((u) => `  ${u}`).join("\n") : "";
+  return [header, status, body].filter(Boolean).join("\n");
 }
 
 const COLORS = {
@@ -154,7 +177,12 @@ function App() {
       abortRef.current = ac;
       setAdding(true);
       setFocus("main");
-      setAddLog(`Indexing ${target}…`);
+      const header = `Indexing ${target}…`;
+      const visited: string[] = [];
+      const seen = new Set<string>();
+      let status = "[…] starting";
+      const render = () => setAddLog(formatIngestLog(header, status, visited));
+      render();
       try {
         const report = await ingestTarget(
           state.db,
@@ -165,11 +193,16 @@ function App() {
             signal: ac.signal,
             onProgress: (p) => {
               if (ac.signal.aborted) return;
-              setAddLog(
+              status =
                 p.current && p.total
-                  ? `[${p.phase}] ${p.current}/${p.total} ${p.message ?? ""}`
-                  : `[${p.phase}] ${p.message ?? ""}`,
-              );
+                  ? `[${p.phase}] ${p.current}/${p.total}`
+                  : `[${p.phase}] ${p.message && !visitFromProgress(p.phase, p.message) ? p.message : ""}`.trim();
+              const visit = visitFromProgress(p.phase, p.message);
+              if (visit && !seen.has(visit)) {
+                seen.add(visit);
+                visited.push(visit);
+              }
+              render();
             },
           },
         );
@@ -178,8 +211,12 @@ function App() {
           return;
         }
         setAddLog(
-          `Done: ${report.pagesOk} ok, ${report.pagesSkipped} skipped, ${report.pagesFailed} failed` +
-            (report.strategy ? ` (${report.strategy})` : ""),
+          formatIngestLog(
+            header,
+            `Done: ${report.pagesOk} ok, ${report.pagesSkipped} skipped, ${report.pagesFailed} failed` +
+              (report.strategy ? ` (${report.strategy})` : ""),
+            visited,
+          ),
         );
         await refresh();
       } catch (err) {
@@ -198,7 +235,7 @@ function App() {
   );
 
   const runUpdate = useCallback(
-    async (targets: string[], label: string, recreate = false) => {
+    async (targets: string[], label: string) => {
       if (targets.length === 0 || !state.loaded || !state.db || busy) return;
       abortRef.current?.abort();
       const ac = new AbortController();
@@ -211,31 +248,41 @@ function App() {
         lines.push(line);
         setUpdateLog(lines.join("\n"));
       };
-      push(`${recreate ? "Reindexing" : "Updating"} ${label}…`);
+      push(`Updating ${label}…`);
       try {
         for (let i = 0; i < targets.length; i++) {
           throwIfBusyAborted(ac.signal);
           const target = targets[i]!;
           push(`[${i + 1}/${targets.length}] ${target}`);
+          const visited: string[] = [];
+          const seen = new Set<string>();
           const report = await ingestTarget(
             state.db,
             state.loaded.config,
             state.loaded.dataDir,
             target,
             {
-              recreate,
+              recreate: false,
               signal: ac.signal,
               onProgress: (p) => {
                 if (ac.signal.aborted) return;
-                const msg =
+                const status =
                   p.current && p.total
-                    ? `[${p.phase}] ${p.current}/${p.total} ${p.message ?? ""}`
-                    : `[${p.phase}] ${p.message ?? ""}`;
-                setUpdateLog([...lines, msg].join("\n"));
+                    ? `[${p.phase}] ${p.current}/${p.total}`
+                    : `[${p.phase}] ${p.message && !visitFromProgress(p.phase, p.message) ? p.message : ""}`.trim();
+                const visit = visitFromProgress(p.phase, p.message);
+                if (visit && !seen.has(visit)) {
+                  seen.add(visit);
+                  visited.push(visit);
+                }
+                setUpdateLog([...lines, status, ...visited.map((u) => `  ${u}`)].join("\n"));
               },
             },
           );
           throwIfBusyAborted(ac.signal);
+          for (const u of visited) {
+            lines.push(`  ${u}`);
+          }
           push(
             `  → ${report.pagesOk} ok, ${report.pagesSkipped} skipped, ${report.pagesFailed} failed` +
               (report.strategy ? ` (${report.strategy})` : ""),
@@ -255,6 +302,55 @@ function App() {
       }
     },
     [state.loaded, state.db, refresh, busy],
+  );
+
+  const runReembed = useCallback(
+    async (label: string, sourceId?: string) => {
+      if (!state.loaded || !state.db || busy) return;
+      if (!sourceId && state.sources.length === 0) return;
+      abortRef.current?.abort();
+      const ac = new AbortController();
+      abortRef.current = ac;
+      setUpdating(true);
+      setFocus("main");
+      setView("sources");
+      setUpdateLog(`Re-embedding ${label} (no re-fetch)…`);
+      try {
+        const report = await reembedChunks(state.db, state.loaded.config, state.loaded.dataDir, {
+          signal: ac.signal,
+          sourceId,
+          onProgress: (p) => {
+            if (ac.signal.aborted) return;
+            setUpdateLog(
+              p.current && p.total
+                ? `[${p.phase}] ${p.current}/${p.total} ${p.message ?? ""}`
+                : `[${p.phase}] ${p.message ?? ""}`,
+            );
+          },
+        });
+        if (ac.signal.aborted) {
+          setUpdateLog("Cancelled.");
+          return;
+        }
+        setUpdateLog(
+          `Done: ${report.chunksEmbedded}/${report.chunksTotal} chunks · ${report.modelId} · ${report.dims}-d` +
+            (report.previousDims != null && report.previousDims !== report.dims
+              ? ` (was ${report.previousDims}-d)`
+              : ""),
+        );
+        await refresh();
+      } catch (err) {
+        if (ac.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+          setUpdateLog("Cancelled.");
+          return;
+        }
+        setUpdateLog(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (abortRef.current === ac) abortRef.current = null;
+        setUpdating(false);
+      }
+    },
+    [state.loaded, state.db, state.sources.length, refresh, busy],
   );
 
   const runRemove = useCallback(
@@ -348,11 +444,7 @@ function App() {
       }
       if (key.name === "i" || key.name === "I") {
         if (state.sources.length > 0) {
-          void runUpdate(
-            state.sources.map((s) => s.root_uri),
-            `all ${state.sources.length} sources`,
-            true,
-          );
+          void runReembed(`all ${state.sources.length} sources`);
         }
       }
       if (key.name === "d" || key.name === "x") {
@@ -496,11 +588,7 @@ function App() {
                     backgroundColor={hoveredNav === "reindex-all" ? COLORS.border : COLORS.panel}
                     onMouseDown={() => {
                       if (!busy && state.sources.length > 0) {
-                        void runUpdate(
-                          state.sources.map((s) => s.root_uri),
-                          `all ${state.sources.length} sources`,
-                          true,
-                        );
+                        void runReembed(`all ${state.sources.length} sources`);
                       }
                     }}
                     onMouseOver={() => setHoveredNav("reindex-all")}
@@ -515,7 +603,7 @@ function App() {
                             : COLORS.yellow
                       }
                     >
-                      I reindex all
+                      I re-embed all
                     </text>
                   </box>
                 </box>
@@ -675,7 +763,7 @@ function App() {
 
                 {!updating && !updateLog && (
                   <text fg={COLORS.muted}>
-                    u update · d remove · U update all · I reindex all (force embeddings)
+                    u update · d remove · U update all · I re-embed all (embeddings only)
                   </text>
                 )}
               </box>
@@ -835,9 +923,29 @@ function App() {
                 }}
               >
                 {adding ? (
-                  <text fg={COLORS.yellow}>{addLog || "Working…"} (Esc / Cancel)</text>
+                  (addLog || "Working…").split("\n").map((line, i) => (
+                    <text
+                      key={`add-${String(i)}-${line.slice(0, 24)}`}
+                      fg={i === 0 || line.startsWith("[") ? COLORS.yellow : COLORS.muted}
+                    >
+                      {line || " "}
+                    </text>
+                  ))
                 ) : addLog ? (
-                  <text fg={addLog.startsWith("Done") ? COLORS.green : COLORS.text}>{addLog}</text>
+                  addLog.split("\n").map((line, i) => (
+                    <text
+                      key={`add-done-${String(i)}-${line.slice(0, 24)}`}
+                      fg={
+                        line.startsWith("Done")
+                          ? COLORS.green
+                          : line.startsWith("  ")
+                            ? COLORS.muted
+                            : COLORS.text
+                      }
+                    >
+                      {line || " "}
+                    </text>
+                  ))
                 ) : (
                   <text fg={COLORS.muted}>
                     Paste a docs URL, GitHub repo, or local folder path, then Enter.

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { embed as aiEmbed } from "ai";
+import { embed as aiEmbed, embedMany } from "ai";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { resolveApiKey } from "../util/api-key.ts";
 import { ensureModel2VecBinary } from "./model2vec-bin.ts";
@@ -110,7 +110,7 @@ function createModel2VecEmbedder(config: LocaldocConfig, dataDir: string): Embed
         return [];
       }
       const out: Float32Array[] = [];
-      const batchSize = 64;
+      const batchSize = Math.max(1, config.embeddings.batch_size ?? 20);
       for (let i = 0; i < texts.length; i += batchSize) {
         const batch = texts.slice(i, i + batchSize);
         const { embeddings, dims: d } = await encodeWithModel2VecSidecar(
@@ -155,31 +155,46 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
   if (!oc) {
     throw new Error("embeddings.openai config is required when provider is openai");
   }
+  const modelId = config.embeddings.model || "text-embedding-3-small";
   const apiKey = resolveApiKey(oc.api_key, "OpenAI embeddings");
   const provider = createOpenAICompatible({
     name: "openai",
     baseURL: oc.base_url,
     apiKey,
   });
-  const model = provider.embeddingModel(oc.model);
+  const model = provider.embeddingModel(modelId);
   let dims = 0;
 
   return {
     get modelId() {
-      return `openai:${oc.model}`;
+      return `openai:${modelId}`;
     },
     get dims() {
       return dims;
     },
     async embed(texts: string[]) {
+      if (texts.length === 0) return [];
       const out: Float32Array[] = [];
-      for (const text of texts) {
-        const { embedding } = await aiEmbed({
-          model,
-          value: text,
-        });
-        dims = embedding.length;
-        out.push(Float32Array.from(embedding));
+      const batchSize = Math.max(1, config.embeddings.batch_size ?? 20);
+      for (let i = 0; i < texts.length; i += batchSize) {
+        const batch = texts.slice(i, i + batchSize);
+        if (batch.length === 1) {
+          const { embedding } = await aiEmbed({
+            model,
+            value: batch[0]!,
+          });
+          dims = embedding.length;
+          out.push(Float32Array.from(embedding));
+        } else {
+          const { embeddings } = await embedMany({
+            model,
+            values: batch,
+          });
+          for (const embedding of embeddings) {
+            dims = embedding.length;
+            out.push(Float32Array.from(embedding));
+          }
+        }
       }
       return out;
     },

@@ -12,7 +12,6 @@ const OpenAISchema = z.preprocess(
     base_url: z.string().default("https://api.openai.com/v1"),
     /** `$ENV_NAME` reads from the environment; any other value is the literal key. */
     api_key: z.string().default("$OPENAI_API_KEY"),
-    model: z.string().default("text-embedding-3-small"),
   }),
 );
 
@@ -41,17 +40,37 @@ export const ConfigSchema = z.object({
         o.openai = o.openai_compatible;
       }
       delete o.openai_compatible;
+      // Promote legacy embeddings.openai.model → embeddings.model
+      if (o.openai && typeof o.openai === "object" && !Array.isArray(o.openai)) {
+        const openai = { ...(o.openai as Record<string, unknown>) };
+        if (typeof openai.model === "string" && openai.model) {
+          const topModel = typeof o.model === "string" ? o.model : "";
+          const isDefaultLocal =
+            !topModel || topModel === "minishlab/potion-base-8M" || o.provider === "openai";
+          if (isDefaultLocal && (o.provider === "openai" || !topModel)) {
+            if (!topModel || topModel === "minishlab/potion-base-8M") {
+              o.model = openai.model;
+            }
+          }
+        }
+        delete openai.model;
+        o.openai = openai;
+      }
       return o;
     },
     z
       .object({
         provider: z.enum(["model2vec", "openai"]).default("model2vec"),
+        /** Model id for the active provider (Model2Vec repo id or OpenAI embedding model). */
         model: z.string().default("minishlab/potion-base-8M"),
+        /** Texts per embedding API / sidecar call. */
+        batch_size: z.number().int().positive().default(20),
         openai: OpenAISchema.optional(),
       })
       .default({
         provider: "model2vec",
         model: "minishlab/potion-base-8M",
+        batch_size: 20,
       }),
   ),
   rerank: z

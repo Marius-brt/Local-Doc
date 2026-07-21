@@ -37,10 +37,10 @@ export default defineCommand({
         recreate: Boolean(args.recreate),
         strategy: args.strategy as DiscoveryStrategy | undefined,
         onProgress: (p) => {
-          if (p.current && p.total) {
-            process.stdout.write(
-              `\r[${p.phase}] ${p.current}/${p.total} ${p.message ?? ""}`.slice(0, 100),
-            );
+          if (p.current && p.total && p.message && !/^Fetching \d+ /.test(p.message)) {
+            console.log(`[${p.phase}] ${p.current}/${p.total} ${p.message}`);
+          } else if (p.current && p.total) {
+            process.stdout.write(`\r[${p.phase}] ${p.current}/${p.total}`.padEnd(40));
           } else if (p.message) {
             console.log(`[${p.phase}] ${p.message}`);
           }

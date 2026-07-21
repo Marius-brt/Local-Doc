@@ -68,10 +68,12 @@ embeddings:
   # Local default (embedded Model2Vec sidecar)
   provider: model2vec          # model2vec | openai
   model: minishlab/potion-base-8M
+  batch_size: 20
+  # provider: openai
+  # model: text-embedding-3-small
   # openai:
   #   base_url: https://api.openai.com/v1
   #   api_key: $OPENAI_API_KEY   # $ENV → env; else literal key
-  #   model: text-embedding-3-small
 
 rerank:
   enabled: false
@@ -147,6 +149,7 @@ Leave `url: null` for direct connections. Legacy flat `http.proxy: "http://…"`
 ```yaml
 embeddings:
   provider: openai
+  model: text-embedding-3-small
   openai:
     base_url: https://api.openai.com/v1
     api_key: $OPENAI_API_KEY          # → process.env.OPENAI_API_KEY
@@ -197,7 +200,7 @@ bun run localdoc tui
 bun run localdoc   # opens TUI when run with no args in a TTY
 ```
 
-Keys: `1–4` switch views · `j/k` or arrows browse sources · `u` update · `U` update all · `I` reindex all (force, after embedding model change) · `d` remove · Enter submit · Esc / **Cancel** stops running work · `r` refresh · `q` / Ctrl+C quit.
+Keys: `1–4` switch views · `j/k` or arrows browse sources · `u` update · `U` update all · `I` re-embed all (embeddings only, no re-fetch) · `d` remove · Enter submit · Esc / **Cancel** stops running work · `r` refresh · `q` / Ctrl+C quit.
 
 ## Agent skills
 

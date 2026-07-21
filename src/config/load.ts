@@ -14,10 +14,10 @@ data_dir: ~/.localdoc
 embeddings:
   provider: model2vec
   model: minishlab/potion-base-8M
+  batch_size: 20
   # openai:
   #   base_url: https://api.openai.com/v1
   #   api_key: $OPENAI_API_KEY   # $ENV → env var; otherwise literal key
-  #   model: text-embedding-3-small
 
 rerank:
   enabled: false

@@ -5,10 +5,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { loadConfig } from "../config/load.ts";
 import { getDb } from "../db/client.ts";
 import { countStats } from "../db/documents.ts";
-import { listSources } from "../db/sources.ts";
+import { getSource, listSources } from "../db/sources.ts";
 import { tryCreateEmbedder } from "../embed/index.ts";
 import { buildContextPack, formatPackMarkdown } from "../pack/format.ts";
-import { hybridSearch } from "../search/hybrid.ts";
+import { hybridSearch, parseChunkKinds, type SearchFilters, splitList } from "../search/hybrid.ts";
 
 export async function startMcpServer(configPath?: string): Promise<void> {
   // Connect stdio ASAP so MCP clients (OpenCode default timeout 5s) do not
@@ -48,6 +48,22 @@ export async function startMcpServer(configPath?: string): Promise<void> {
               type: "string",
               enum: ["markdown", "json"],
               description: "Output format",
+            },
+            kinds: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Chunk kinds to include: prose, table, code (aliases: text, markdown). Optional.",
+            },
+            sources: {
+              type: "array",
+              items: { type: "string" },
+              description: "Source id(s) or root URI(s) to search. Optional.",
+            },
+            keywords: {
+              type: "array",
+              items: { type: "string" },
+              description: "Keywords that must appear in each returned chunk. Optional.",
             },
           },
           required: ["question"],
@@ -122,8 +138,39 @@ export async function startMcpServer(configPath?: string): Promise<void> {
       if (typeof args.budget === "number") {
         config.search = { ...config.search, budget_tokens: args.budget };
       }
+
+      const kindValues = Array.isArray(args.kinds)
+        ? args.kinds.map(String)
+        : typeof args.kinds === "string"
+          ? splitList(args.kinds)
+          : [];
+      const sourceRefs = Array.isArray(args.sources)
+        ? args.sources.map(String)
+        : typeof args.sources === "string"
+          ? splitList(args.sources)
+          : [];
+      const keywords = Array.isArray(args.keywords)
+        ? args.keywords.map(String).filter(Boolean)
+        : typeof args.keywords === "string"
+          ? splitList(args.keywords)
+          : [];
+
+      const filters: SearchFilters = {};
+      const kinds = parseChunkKinds(kindValues);
+      if (kinds.length) filters.kinds = kinds;
+      if (keywords.length) filters.keywords = keywords;
+      if (sourceRefs.length) {
+        const sourceIds: string[] = [];
+        for (const ref of sourceRefs) {
+          const src = await getSource(db, ref);
+          if (!src) throw new Error(`Source not found: ${ref}`);
+          sourceIds.push(src.id);
+        }
+        filters.sourceIds = sourceIds;
+      }
+
       const embedder = await tryCreateEmbedder(config, loaded.dataDir);
-      const hits = await hybridSearch(db, question, config, embedder);
+      const hits = await hybridSearch(db, question, config, embedder, filters);
       const pack = buildContextPack(question, hits, config.search.budget_tokens);
       const format = args.format === "json" ? "json" : "markdown";
       const text = format === "json" ? JSON.stringify(pack, null, 2) : formatPackMarkdown(pack);

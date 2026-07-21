@@ -5,6 +5,7 @@ import { defineCommand } from "citty";
 import { getDb } from "../../db/client.ts";
 import { countStats } from "../../db/documents.ts";
 import { listSources } from "../../db/sources.ts";
+import { formatUriForDisplay } from "../../util/file-uri.ts";
 import { createCtx } from "../context.ts";
 
 export default defineCommand({
@@ -31,7 +32,7 @@ export default defineCommand({
       console.log("");
       console.log(chalk.bold("Sources"));
       for (const s of sources) {
-        console.log(`  ${s.id}  ${s.kind}  ${s.status}  ${s.root_uri}`);
+        console.log(`  ${s.id}  ${s.kind}  ${s.status}  ${formatUriForDisplay(s.root_uri)}`);
       }
     }
 

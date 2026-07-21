@@ -200,6 +200,7 @@ localdoc list
 localdoc list --all
 localdoc query "how to authenticate"
 localdoc query "…" --format json --limit 10 --budget 2400
+localdoc query "auth flow" --kind code --source https://docs.example.com --keyword Bearer,token
 localdoc inspect
 localdoc doctor
 localdoc reset-config
@@ -274,7 +275,7 @@ bun run format
 localdoc mcp serve
 ```
 
-Tools: `query`, `list`, `inspect`.
+Tools: `query` (optional `kinds`, `sources`, `keywords`), `list`, `inspect`.
 
 ## Build executables
 

@@ -2,6 +2,7 @@ import chalk from "chalk";
 import { defineCommand } from "citty";
 import { getDb } from "../../db/client.ts";
 import { listSources } from "../../db/sources.ts";
+import { formatUriForDisplay } from "../../util/file-uri.ts";
 import { createCtx } from "../context.ts";
 
 export default defineCommand({
@@ -27,7 +28,7 @@ export default defineCommand({
     console.log(chalk.bold(`Sources (${sources.length})`));
     for (const s of sources) {
       console.log(
-        `${chalk.cyan(s.id)}  ${s.kind.padEnd(7)}  ${s.status.padEnd(10)}  ${s.root_uri}` +
+        `${chalk.cyan(s.id)}  ${s.kind.padEnd(7)}  ${s.status.padEnd(10)}  ${formatUriForDisplay(s.root_uri)}` +
           (s.strategy ? chalk.dim(`  [${s.strategy}]`) : ""),
       );
     }
@@ -42,7 +43,8 @@ export default defineCommand({
       console.log("");
       console.log(chalk.bold(`Documents (${docs.rows.length})`));
       for (const row of docs.rows) {
-        console.log(`  ${row.status}  ${row.uri}${row.title ? chalk.dim(`  (${row.title})`) : ""}`);
+        const uri = formatUriForDisplay(String(row.uri));
+        console.log(`  ${row.status}  ${uri}${row.title ? chalk.dim(`  (${row.title})`) : ""}`);
       }
     }
   },

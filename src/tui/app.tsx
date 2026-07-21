@@ -9,9 +9,10 @@ import { listSources, removeSource, type SourceRow } from "../db/sources.ts";
 import { tryCreateEmbedder } from "../embed/index.ts";
 import { buildContextPack, formatPackMarkdown } from "../pack/format.ts";
 import { hybridSearch } from "../search/hybrid.ts";
-import { formatError, flushLog, log } from "../util/log.ts";
 import { ingestTarget } from "../sources/ingest.ts";
 import { reembedChunks } from "../sources/reembed.ts";
+import { formatUriForDisplay } from "../util/file-uri.ts";
+import { flushLog, formatError, log } from "../util/log.ts";
 
 type View = "sources" | "query" | "inspect" | "add";
 
@@ -83,6 +84,13 @@ function ActionButton(props: {
 function formatIngestLog(header: string, status: string, visited: string[]): string {
   const body = visited.length > 0 ? visited.map((u) => `  ${u}`).join("\n") : "";
   return [header, status, body].filter(Boolean).join("\n");
+}
+
+/** Prefer end of long paths so filename/folder remains visible. */
+function displayPath(value: string, max = 64): string {
+  const s = formatUriForDisplay(value);
+  if (s.length <= max) return s;
+  return `…${s.slice(-(max - 1))}`;
 }
 
 const COLORS = {
@@ -670,7 +678,7 @@ function App() {
                         <text fg={i === sourceCursor ? COLORS.text : COLORS.muted}>
                           {s.kind.padEnd(7)} {s.status}
                         </text>
-                        <text fg={COLORS.muted}>{s.root_uri}</text>
+                        <text fg={COLORS.muted}>{displayPath(s.root_uri, 48)}</text>
                       </box>
                     ))
                   )}
@@ -688,20 +696,22 @@ function App() {
                 gap={1}
               >
                 {selected ? (
-                  <box flexDirection="column" gap={0}>
-                    <text fg={COLORS.accent}>{selected.title || selected.id}</text>
+                  <box flexShrink={0} flexDirection="column" width="100%" gap={0}>
+                    <text fg={COLORS.accent}>
+                      {displayPath(selected.title || selected.root_uri || selected.id)}
+                    </text>
                     <text fg={COLORS.muted}>id: {selected.id}</text>
                     <text fg={COLORS.muted}>kind: {selected.kind}</text>
                     <text fg={COLORS.muted}>status: {selected.status}</text>
                     <text fg={COLORS.muted}>strategy: {selected.strategy ?? "—"}</text>
-                    <text fg={COLORS.text}>{selected.root_uri}</text>
+                    <text fg={COLORS.text}>{displayPath(selected.root_uri, 72)}</text>
                     <text fg={COLORS.muted}>updated: {selected.updated_at}</text>
                   </box>
                 ) : (
                   <text fg={COLORS.muted}>Select a source (j/k or ↑/↓)</text>
                 )}
 
-                <box flexDirection="row" gap={1} marginTop={1}>
+                <box flexShrink={0} flexDirection="row" gap={1} marginTop={1}>
                   <ActionButton
                     label="u update"
                     borderColor={hoveredNav === "update" ? COLORS.accent : COLORS.border}
@@ -755,23 +765,28 @@ function App() {
                   <scrollbox
                     width="100%"
                     flexGrow={1}
+                    stickyScroll
+                    stickyStart="bottom"
+                    viewportCulling={false}
                     style={{
                       rootOptions: { backgroundColor: COLORS.panel },
+                      contentOptions: { backgroundColor: COLORS.panel },
                     }}
                   >
                     {(updateLog || "Working…").split("\n").map((line, i) => (
-                      <text
-                        key={`upd-${String(i)}-${line.slice(0, 12)}`}
-                        fg={
-                          updating
-                            ? COLORS.yellow
-                            : line.startsWith("Done") || line.startsWith("Removed")
-                              ? COLORS.green
-                              : COLORS.text
-                        }
-                      >
-                        {line || " "}
-                      </text>
+                      <box key={`upd-${i}`} width="100%" height={1} flexShrink={0}>
+                        <text
+                          fg={
+                            updating
+                              ? COLORS.yellow
+                              : line.startsWith("Done") || line.startsWith("Removed")
+                                ? COLORS.green
+                                : COLORS.text
+                          }
+                        >
+                          {line || " "}
+                        </text>
+                      </box>
                     ))}
                   </scrollbox>
                 )}
@@ -925,33 +940,33 @@ function App() {
               <scrollbox
                 width="100%"
                 flexGrow={1}
+                stickyScroll
+                stickyStart="bottom"
+                viewportCulling={false}
                 style={{
                   rootOptions: { backgroundColor: COLORS.panel },
+                  contentOptions: { backgroundColor: COLORS.panel },
                 }}
               >
-                {adding ? (
+                {adding || addLog ? (
                   (addLog || "Working…").split("\n").map((line, i) => (
-                    <text
-                      key={`add-${String(i)}-${line.slice(0, 24)}`}
-                      fg={i === 0 || line.startsWith("[") ? COLORS.yellow : COLORS.muted}
-                    >
-                      {line || " "}
-                    </text>
-                  ))
-                ) : addLog ? (
-                  addLog.split("\n").map((line, i) => (
-                    <text
-                      key={`add-done-${String(i)}-${line.slice(0, 24)}`}
-                      fg={
-                        line.startsWith("Done")
-                          ? COLORS.green
-                          : line.startsWith("  ")
-                            ? COLORS.muted
-                            : COLORS.text
-                      }
-                    >
-                      {line || " "}
-                    </text>
+                    <box key={`add-${i}`} width="100%" height={1} flexShrink={0}>
+                      <text
+                        fg={
+                          adding
+                            ? i === 0 || line.startsWith("[")
+                              ? COLORS.yellow
+                              : COLORS.muted
+                            : line.startsWith("Done")
+                              ? COLORS.green
+                              : line.startsWith("  ")
+                                ? COLORS.muted
+                                : COLORS.text
+                        }
+                      >
+                        {line || " "}
+                      </text>
+                    </box>
                   ))
                 ) : (
                   <text fg={COLORS.muted}>

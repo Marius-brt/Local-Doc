@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import fg from "fast-glob";
 import { isTextDocPath } from "../chunk/index.ts";
+import { pathToUri } from "../util/file-uri.ts";
 
 const IGNORE = [
   "**/node_modules/**",
@@ -46,7 +47,7 @@ export async function collectFolderFiles(root: string): Promise<FolderFile[]> {
     if (content.length > 2_000_000) continue;
     files.push({
       path: abs,
-      uri: `file://${abs}`,
+      uri: pathToUri(abs),
       content,
     });
   }

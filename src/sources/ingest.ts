@@ -1,5 +1,5 @@
 import { mkdir, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import pLimit from "p-limit";
 import { chunkDocument } from "../chunk/index.ts";
@@ -19,6 +19,7 @@ import { type SourceKind, upsertSource } from "../db/sources.ts";
 import { ensureVectorIndex } from "../db/vector-index.ts";
 import { type Embedder, tryCreateEmbedder } from "../embed/index.ts";
 import { isBoilerplateOnly } from "../extract/html.ts";
+import { pathToUri, resolveFolderPath } from "../util/file-uri.ts";
 import { sha256, shortId } from "../util/hash.ts";
 import { collectFolderFiles } from "./folder.ts";
 import { collectGithubFiles, collectGithubViaApi, isGithubInput } from "./github.ts";
@@ -356,9 +357,9 @@ export async function ingestFolder(
 ): Promise<IngestReport> {
   const startedAt = nowIso();
   const progress = options.onProgress ?? (() => {});
-  const abs = isAbsolute(folderPath) ? folderPath : resolve(process.cwd(), folderPath);
+  const abs = resolveFolderPath(folderPath);
   const embedder = await tryCreateEmbedder(config, dataDir);
-  const rootUri = `file://${abs}`;
+  const rootUri = pathToUri(abs);
 
   const source = await upsertSource(db, {
     kind: "folder",
@@ -546,8 +547,8 @@ export async function ingestTarget(
   if (/^https?:\/\//i.test(target)) {
     return ingestWeb(db, config, dataDir, target, options);
   }
-  // folder
-  const abs = isAbsolute(target) ? target : resolve(process.cwd(), target);
+  // folder (path or file:// URI from stored root_uri on update)
+  const abs = resolveFolderPath(target);
   const st = await stat(abs);
   if (!st.isDirectory()) {
     throw new Error(`Not a directory, URL, or GitHub repo: ${target}`);

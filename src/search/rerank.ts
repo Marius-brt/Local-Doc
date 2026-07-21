@@ -4,7 +4,7 @@ import { rerank } from "ai";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { buildFetchInit } from "../crawl/fetch.ts";
 import { resolveApiKey } from "../util/api-key.ts";
-import { formatError, flushLog, log } from "../util/log.ts";
+import { flushLog, formatError, log } from "../util/log.ts";
 import type { SearchHit } from "./hybrid.ts";
 
 export type RankedHit = SearchHit;

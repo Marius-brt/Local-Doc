@@ -3,6 +3,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { embed as aiEmbed, embedMany } from "ai";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { resolveApiKey } from "../util/api-key.ts";
+import { log } from "../util/log.ts";
 import { ensureModel2VecBinary } from "./model2vec-bin.ts";
 import { DEFAULT_MODEL_ID, ensureModel2VecWeights } from "./model2vec-weights.ts";
 import { ensureOnnxNatives } from "./onnx-natives.ts";
@@ -86,9 +87,10 @@ async function encodeWithModel2VecSidecar(
       parsed = JSON.parse(stdout) as SidecarResponse;
     } catch {
       throwIfEmbedAborted(signal);
-      throw new Error(
-        `model2vec sidecar returned invalid JSON (exit ${exitCode}): ${stdout || stderr}`,
-      );
+      const preview = (stdout || stderr || "(empty)").slice(0, 500);
+      const msg = `model2vec sidecar returned invalid JSON (exit ${exitCode}): ${preview}`;
+      log.error(msg);
+      throw new Error(msg);
     }
     if (parsed.error || exitCode !== 0) {
       throwIfEmbedAborted(signal);
@@ -261,9 +263,7 @@ export async function tryCreateEmbedder(
     }
     return createModel2VecEmbedder(config, dataDir);
   } catch (err) {
-    console.error(
-      `[localdoc] embeddings unavailable: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    log.error(`embeddings unavailable: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }

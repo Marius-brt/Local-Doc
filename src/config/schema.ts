@@ -15,19 +15,23 @@ const OpenAISchema = z.preprocess(
   }),
 );
 
-const CohereRerankSchema = z.preprocess(
-  (val) => {
-    if (val && typeof val === "object" && !Array.isArray(val)) {
-      return migrateApiKeyFields({ ...(val as Record<string, unknown>) });
+function migrateRerankConfig(val: unknown): unknown {
+  if (!val || typeof val !== "object" || Array.isArray(val)) return val;
+  const o = migrateApiKeyFields({ ...(val as Record<string, unknown>) });
+
+  // Promote legacy rerank.cohere.{base_url,api_key} → rerank.{base_url,api_key}
+  if (o.cohere && typeof o.cohere === "object" && !Array.isArray(o.cohere)) {
+    const cohere = migrateApiKeyFields({ ...(o.cohere as Record<string, unknown>) });
+    if (o.base_url == null && typeof cohere.base_url === "string") {
+      o.base_url = cohere.base_url;
     }
-    return val;
-  },
-  z.object({
-    base_url: z.string().default("https://api.cohere.com/v2"),
-    /** `$ENV_NAME` reads from the environment; any other value is the literal key. */
-    api_key: z.string().default("$COHERE_API_KEY"),
-  }),
-);
+    if (o.api_key == null && typeof cohere.api_key === "string") {
+      o.api_key = cohere.api_key;
+    }
+  }
+  delete o.cohere;
+  return o;
+}
 
 export const ConfigSchema = z.object({
   data_dir: z.string().default("~/.localdoc"),
@@ -73,18 +77,27 @@ export const ConfigSchema = z.object({
         batch_size: 20,
       }),
   ),
-  rerank: z
-    .object({
-      enabled: z.boolean().default(false),
-      provider: z.enum(["none", "local", "cohere"]).default("none"),
-      model: z.string().nullable().default(null),
-      cohere: CohereRerankSchema.optional(),
-    })
-    .default({
-      enabled: false,
-      provider: "none",
-      model: null,
-    }),
+  rerank: z.preprocess(
+    migrateRerankConfig,
+    z
+      .object({
+        enabled: z.boolean().default(false),
+        /** `openai` = llama.cpp / TEI / Jina-style POST /rerank */
+        provider: z.enum(["none", "local", "cohere", "openai"]).default("none"),
+        model: z.string().nullable().default(null),
+        /** Shared by cohere + openai providers. */
+        base_url: z.string().nullable().default(null),
+        /** `$ENV_NAME` or literal; optional for local openai-compatible servers. */
+        api_key: z.string().nullable().default(null),
+      })
+      .default({
+        enabled: false,
+        provider: "none",
+        model: null,
+        base_url: null,
+        api_key: null,
+      }),
+  ),
   search: z
     .object({
       rrf_k: z.number().int().positive().default(60),
@@ -148,8 +161,6 @@ export const ConfigSchema = z.object({
           if (p.reject_unauthorized == null && typeof flatTls === "boolean") {
             p.reject_unauthorized = flatTls;
           }
-          // Accept legacy `url` alias from `proxy: "http://..."` already handled;
-          // also map `no_proxy` → ignore if present
           if (p.ignore == null && typeof p.no_proxy === "string") {
             p.ignore = String(p.no_proxy)
               .split(",")
@@ -164,11 +175,8 @@ export const ConfigSchema = z.object({
       z.object({
         proxy: z
           .object({
-            /** HTTP(S)/SOCKS proxy URL for both http:// and https:// targets. */
             url: z.string().nullable().default(null),
-            /** Hosts that bypass the proxy (exact, `.domain`, or `*.domain`). */
             ignore: z.array(z.string()).default([]),
-            /** When false, skip TLS certificate verification (insecure). */
             reject_unauthorized: z.boolean().default(true),
           })
           .default({
@@ -188,6 +196,15 @@ export const ConfigSchema = z.object({
       },
       headers: {},
       retries: 3,
+    }),
+  log: z
+    .object({
+      level: z.enum(["debug", "info", "warn", "error"]).default("info"),
+      file: z.string().nullable().default(null),
+    })
+    .default({
+      level: "info",
+      file: null,
     }),
 });
 

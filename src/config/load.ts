@@ -1,6 +1,7 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { initLog } from "../util/log.ts";
 import { defaultDataDir, expandHome, resolveConfigPath } from "../util/paths.ts";
 import { ConfigSchema, type LocaldocConfig } from "./schema.ts";
 
@@ -23,9 +24,15 @@ rerank:
   enabled: false
   provider: none
   model: null
-  # cohere:
-  #   base_url: https://api.cohere.com/v2
-  #   api_key: $COHERE_API_KEY
+  base_url: null
+  api_key: null
+  # provider: openai
+  # model: bge-reranker
+  # base_url: http://127.0.0.1:8080
+  # provider: cohere
+  # model: rerank-v3.5
+  # base_url: https://api.cohere.com/v2
+  # api_key: $COHERE_API_KEY
 
 search:
   rrf_k: 60
@@ -56,6 +63,10 @@ http:
     reject_unauthorized: true
   headers: {}
   retries: 3
+
+log:
+  level: info          # debug | info | warn | error
+  file: null           # default: <data_dir>/logs/localdoc.log
 `;
 
 export interface LoadedConfig {
@@ -96,8 +107,24 @@ export async function loadConfig(overridePath?: string): Promise<LoadedConfig> {
   await mkdir(join(dataDir, "cache"), { recursive: true });
   await mkdir(join(dataDir, "extracted"), { recursive: true });
   await mkdir(join(dataDir, "browsers"), { recursive: true });
+  await initLog({
+    dataDir,
+    level: config.log.level,
+    file: config.log.file,
+  });
 
   return { config, configPath, dataDir, created };
+}
+
+/** Overwrite config.yml with the built-in defaults (does not touch the index/data dir). */
+export async function resetConfig(
+  overridePath?: string,
+): Promise<{ configPath: string; existed: boolean }> {
+  const configPath = resolveConfigPath(overridePath);
+  const existed = await exists(configPath);
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(configPath, DEFAULT_CONFIG_YAML, "utf8");
+  return { configPath, existed };
 }
 
 export async function saveConfig(configPath: string, config: LocaldocConfig): Promise<void> {

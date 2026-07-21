@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { log } from "../util/log.ts";
 
 const DEFAULT_MODEL_ID = "minishlab/potion-base-8M";
 
@@ -34,6 +35,7 @@ export async function ensureModel2VecWeights(
     }
     const url = hfResolveUrl(modelId, file);
     console.error(`[localdoc] downloading ${modelId}/${file} …`);
+    log.info(`downloading ${modelId}/${file}`);
     const res = await fetch(url, { redirect: "follow" });
     if (!res.ok) {
       throw new Error(`Failed to download ${url}: HTTP ${res.status}`);

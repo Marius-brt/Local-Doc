@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import { log } from "../util/log.ts";
 
 async function getMeta(db: Client, key: string): Promise<string | null> {
   try {
@@ -85,6 +86,7 @@ export async function ensureVectorIndex(db: Client, dims: number): Promise<void>
   console.error(
     `[localdoc] rebuilding vector table for ${dims}-d embeddings (was ${colType ?? "unknown"})`,
   );
+  log.info(`rebuilding vector table for ${dims}-d embeddings (was ${colType ?? "unknown"})`);
 
   await rebuildVectorTable(db, dims, { preserveMatchingRows: true });
 }

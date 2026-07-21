@@ -10,7 +10,7 @@ MIT licensed. Single-file executables via Bun.
 
 - Smart web crawl: `llms-full.txt` → `llms.txt` → sitemap → nav crawl
 - Site adapters (Mintlify, GitBook, Docusaurus, ReadMe, Sphinx) + boilerplate stripping
-- Hybrid search: FTS5 (BM25) + vectors, fused with RRF; optional Cohere (`@ai-sdk/cohere`) / local rerank
+- Hybrid search: FTS5 (BM25) + vectors, fused with RRF; optional Cohere / llama.cpp (`openai`) / local rerank
 - Default local embeddings via embedded Model2Vec Rust sidecar (`minishlab/potion-base-8M`); Transformers.js bundled for local rerank; OpenAI-compatible embeddings optional
 - Prisma migrations for the schema (FTS triggers included in SQL migrations)
 - Playwright auto-fallback for JS-heavy or blocked pages (downloaded on first use)
@@ -55,9 +55,10 @@ bun run localdoc doctor
 ## Config
 
 Default path: `~/.config/localdoc/config.yml`  
-Created automatically on first run with defaults. Override with `--config` or `LOCALDOC_CONFIG`.
+Created automatically on first run with defaults. Override with `--config` or `LOCALDOC_CONFIG`.  
+Reset to defaults with `localdoc reset-config` (use `-y` to skip confirmation). Does not touch the index or data dir.
 
-Data directory (from `data_dir`): `~/.localdoc/` — `index.db`, `models/`, `extracted/`, `browsers/`, `bin/`.
+Data directory (from `data_dir`): `~/.localdoc/` — `index.db`, `models/`, `extracted/`, `browsers/`, `bin/`, `logs/localdoc.log`.
 
 ```yaml
 # ~/.config/localdoc/config.yml
@@ -77,11 +78,17 @@ embeddings:
 
 rerank:
   enabled: false
-  provider: none               # none | local | cohere
+  provider: none               # none | local | cohere | openai
   model: null
-  # cohere:
-  #   base_url: https://api.cohere.com/v2
-  #   api_key: $COHERE_API_KEY
+  base_url: null               # cohere / openai (llama.cpp): e.g. http://127.0.0.1:8080
+  api_key: null                # $ENV or literal; optional for local llama.cpp
+  # provider: openai
+  # model: bge-reranker
+  # base_url: http://127.0.0.1:8080
+  # provider: cohere
+  # model: rerank-v3.5
+  # base_url: https://api.cohere.com/v2
+  # api_key: $COHERE_API_KEY
 
 search:
   rrf_k: 60                    # RRF fusion constant
@@ -110,17 +117,22 @@ http:
     reject_unauthorized: true  # false = skip TLS verify (insecure)
   headers: {}
   retries: 3
+
+log:
+  level: info                  # debug | info | warn | error
+  file: null                   # default: <data_dir>/logs/localdoc.log
 ```
 
 | Section | Purpose |
 | --- | --- |
 | `data_dir` | Index DB, downloaded models, extracted pages, Playwright browsers |
 | `embeddings` | Vector embeddings — local Model2Vec by default, or any OpenAI-compatible API |
-| `rerank` | Optional second-pass ranking (`local` via Transformers.js, or Cohere) |
+| `rerank` | Optional second-pass ranking (`local`, Cohere, or `openai` for llama.cpp/TEI) |
 | `search` | Hybrid FTS + vector fusion and context budget |
 | `chunking` | How ingested markdown is split |
 | `crawl` | Web ingest limits, Playwright policy, crawl headers |
 | `http` | Shared HTTP client: proxy object, retries, headers |
+| `log` | File logging under `data_dir` (default `logs/localdoc.log`) |
 
 ### Proxy & TLS
 
@@ -157,11 +169,18 @@ embeddings:
 
 rerank:
   enabled: true
-  provider: cohere
-  model: rerank-v3.5
-  cohere:
-    base_url: https://api.cohere.com/v2
-    api_key: $COHERE_API_KEY
+  provider: openai                 # llama.cpp / TEI-compatible /rerank
+  model: bge-reranker
+  base_url: http://127.0.0.1:8080
+  # api_key: null                  # optional for local servers
+
+# or Cohere:
+# rerank:
+#   enabled: true
+#   provider: cohere
+#   model: rerank-v3.5
+#   base_url: https://api.cohere.com/v2
+#   api_key: $COHERE_API_KEY
 ```
 
 Legacy `api_key_env: NAME` is still accepted and treated as `$NAME`.
@@ -183,6 +202,8 @@ localdoc query "how to authenticate"
 localdoc query "…" --format json --limit 10 --budget 2400
 localdoc inspect
 localdoc doctor
+localdoc reset-config
+localdoc reset-config -y
 localdoc fetch https://docs.example.com --output ./out
 localdoc install-skill
 localdoc install-skill -a cursor,claude-code,codex

@@ -1,8 +1,10 @@
+import chalk from "chalk";
 import { defineCommand } from "citty";
 import { getDb } from "../../db/client.ts";
 import { tryCreateEmbedder } from "../../embed/index.ts";
 import { buildContextPack, formatPackMarkdown } from "../../pack/format.ts";
 import { hybridSearch } from "../../search/hybrid.ts";
+import { formatError, flushLog, log } from "../../util/log.ts";
 import { createCtx } from "../context.ts";
 
 export default defineCommand({
@@ -37,14 +39,21 @@ export default defineCommand({
       };
     }
 
-    const embedder = await tryCreateEmbedder(config, ctx.loaded.dataDir);
-    const hits = await hybridSearch(db, String(args.question), config, embedder);
-    const pack = buildContextPack(String(args.question), hits, config.search.budget_tokens);
+    try {
+      const embedder = await tryCreateEmbedder(config, ctx.loaded.dataDir);
+      const hits = await hybridSearch(db, String(args.question), config, embedder);
+      const pack = buildContextPack(String(args.question), hits, config.search.budget_tokens);
 
-    if (args.format === "json") {
-      console.log(JSON.stringify(pack, null, 2));
-    } else {
-      console.log(formatPackMarkdown(pack));
+      if (args.format === "json") {
+        console.log(JSON.stringify(pack, null, 2));
+      } else {
+        console.log(formatPackMarkdown(pack));
+      }
+    } catch (err) {
+      log.error(`query failed: ${formatError(err)}`);
+      await flushLog();
+      console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+      process.exitCode = 1;
     }
   },
 });

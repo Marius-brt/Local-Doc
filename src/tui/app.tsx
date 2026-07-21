@@ -9,6 +9,7 @@ import { listSources, removeSource, type SourceRow } from "../db/sources.ts";
 import { tryCreateEmbedder } from "../embed/index.ts";
 import { buildContextPack, formatPackMarkdown } from "../pack/format.ts";
 import { hybridSearch } from "../search/hybrid.ts";
+import { formatError, flushLog, log } from "../util/log.ts";
 import { ingestTarget } from "../sources/ingest.ts";
 import { reembedChunks } from "../sources/reembed.ts";
 
@@ -197,6 +198,8 @@ function App() {
         setResult(formatPackMarkdown(pack));
       } catch (err) {
         if (gen !== queryGenRef.current) return;
+        log.error(`query failed: ${formatError(err)}`);
+        await flushLog();
         setResult(err instanceof Error ? err.message : String(err));
       } finally {
         if (gen === queryGenRef.current) {

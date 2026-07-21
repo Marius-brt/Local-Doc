@@ -17,6 +17,7 @@ import list from "./commands/list.ts";
 import mcp from "./commands/mcp.ts";
 import query from "./commands/query.ts";
 import remove from "./commands/remove.ts";
+import resetConfig from "./commands/reset-config.ts";
 import tui from "./commands/tui.ts";
 import update from "./commands/update.ts";
 
@@ -34,6 +35,7 @@ const main = defineCommand({
     query,
     inspect,
     doctor,
+    "reset-config": resetConfig,
     fetch: fetchCmd,
     "install-skill": installSkill,
     mcp,

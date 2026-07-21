@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client";
 import type { LocaldocConfig } from "../config/schema.ts";
 import type { Embedder } from "../embed/index.ts";
+import { formatError, flushLog, log } from "../util/log.ts";
 import { type RankedHit, rerankResults } from "./rerank.ts";
 
 export interface SearchHit {
@@ -198,6 +199,9 @@ export async function hybridSearch(
   config: LocaldocConfig,
   embedder: Embedder | null,
 ): Promise<SearchHit[]> {
+  log.info(
+    `query start q=${JSON.stringify(query.slice(0, 120))} embedder=${embedder?.modelId ?? "none"} rerank=${config.rerank.enabled ? config.rerank.provider : "off"}`,
+  );
   const ftsHits = await ftsSearch(db, query, config.search.fts_limit);
 
   let vectorHits: SearchHit[] = [];
@@ -206,9 +210,8 @@ export async function hybridSearch(
       const queryVec = await embedder.embedOne(query);
       vectorHits = await vectorSearch(db, queryVec, config.search.vector_limit);
     } catch (err) {
-      console.error(
-        `[localdoc] vector search unavailable (${err instanceof Error ? err.message : String(err)}); using FTS only`,
-      );
+      log.error(`vector search unavailable (${formatError(err)}); using FTS only`);
+      await flushLog();
     }
   }
 
@@ -219,8 +222,16 @@ export async function hybridSearch(
     .sort((a, b) => b.score - a.score);
 
   if (config.rerank.enabled && config.rerank.provider !== "none") {
-    ranked = await rerankResults(query, ranked, config);
+    try {
+      ranked = await rerankResults(query, ranked, config);
+    } catch (err) {
+      log.error(`rerank failed; returning unre-ranked hits: ${formatError(err)}`);
+      await flushLog();
+      // Keep hybrid ranking so a bad rerank provider does not blank the query UI.
+    }
   }
 
-  return ranked.slice(0, config.search.top_k);
+  const out = ranked.slice(0, config.search.top_k);
+  log.info(`query done hits=${out.length} (fts=${ftsHits.length} vector=${vectorHits.length})`);
+  return out;
 }

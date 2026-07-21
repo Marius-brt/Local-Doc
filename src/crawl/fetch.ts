@@ -1,5 +1,6 @@
 import pRetry from "p-retry";
 import type { LocaldocConfig } from "../config/schema.ts";
+import { resolveProxyUrl } from "../util/proxy.ts";
 
 export interface FetchResult {
   ok: boolean;
@@ -27,6 +28,7 @@ function mergeHeaders(
 export function buildFetchInit(
   config: LocaldocConfig,
   opts: {
+    url?: string;
     headers?: Record<string, string>;
     signal?: AbortSignal;
     timeoutMs?: number;
@@ -43,10 +45,14 @@ export function buildFetchInit(
     redirect: opts.redirect ?? "follow",
   };
 
-  if (config.http.proxy) {
-    init.proxy = config.http.proxy;
+  const target = opts.url ?? "";
+  const proxyUrl = target
+    ? resolveProxyUrl(config.http.proxy, target)
+    : (config.http.proxy.url ?? undefined);
+  if (proxyUrl) {
+    init.proxy = proxyUrl;
   }
-  if (!config.http.reject_unauthorized) {
+  if (!config.http.proxy.reject_unauthorized) {
     init.tls = { rejectUnauthorized: false };
   }
   return init;
@@ -65,7 +71,7 @@ export async function fetchText(
           err.name = "AbortError";
           throw err;
         }
-        const res = await fetch(url, buildFetchInit(config, { signal }));
+        const res = await fetch(url, buildFetchInit(config, { url, signal }));
         const body = await res.text();
         return {
           ok: res.ok,

@@ -117,7 +117,7 @@ export async function fetchWithPlaywright(
       userAgent: string;
       extraHTTPHeaders: Record<string, string>;
       ignoreHTTPSErrors?: boolean;
-      proxy?: { server: string };
+      proxy?: { server: string; bypass?: string };
     } = {
       userAgent: "localdoc/0.1 (+https://github.com/Marius-brt/Local-Doc; docs indexer)",
       extraHTTPHeaders: {
@@ -125,11 +125,16 @@ export async function fetchWithPlaywright(
         ...config.crawl.headers,
       },
     };
-    if (!config.http.reject_unauthorized) {
+    if (!config.http.proxy.reject_unauthorized) {
       contextOpts.ignoreHTTPSErrors = true;
     }
-    if (config.http.proxy) {
-      contextOpts.proxy = { server: config.http.proxy };
+    if (config.http.proxy.url) {
+      contextOpts.proxy = {
+        server: config.http.proxy.url,
+        ...(config.http.proxy.ignore.length > 0
+          ? { bypass: config.http.proxy.ignore.join(",") }
+          : {}),
+      };
     }
     const context = await browser.newContext(contextOpts);
     const page = await context.newPage();

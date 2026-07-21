@@ -66,11 +66,11 @@ data_dir: ~/.localdoc
 
 embeddings:
   # Local default (embedded Model2Vec sidecar)
-  provider: model2vec          # model2vec | openai_compatible
+  provider: model2vec          # model2vec | openai
   model: minishlab/potion-base-8M
-  # openai_compatible:
+  # openai:
   #   base_url: https://api.openai.com/v1
-  #   api_key_env: OPENAI_API_KEY
+  #   api_key: $OPENAI_API_KEY   # $ENV → env; else literal key
   #   model: text-embedding-3-small
 
 rerank:
@@ -78,7 +78,8 @@ rerank:
   provider: none               # none | local | cohere
   model: null
   # cohere:
-  #   api_key_env: COHERE_API_KEY
+  #   base_url: https://api.cohere.com/v2
+  #   api_key: $COHERE_API_KEY
 
 search:
   rrf_k: 60                    # RRF fusion constant
@@ -101,10 +102,12 @@ crawl:
   headers: {}
 
 http:
-  proxy: null                  # one proxy for http:// and https://
+  proxy:
+    url: null                  # e.g. http://127.0.0.1:7890
+    ignore: []                 # hosts that bypass the proxy
+    reject_unauthorized: true  # false = skip TLS verify (insecure)
   headers: {}
   retries: 3
-  reject_unauthorized: true    # false = skip TLS verify (insecure)
 ```
 
 | Section | Purpose |
@@ -115,23 +118,50 @@ http:
 | `search` | Hybrid FTS + vector fusion and context budget |
 | `chunking` | How ingested markdown is split |
 | `crawl` | Web ingest limits, Playwright policy, crawl headers |
-| `http` | Shared HTTP client: proxy, TLS, retries, headers |
+| `http` | Shared HTTP client: proxy object, retries, headers |
 
 ### Proxy & TLS
 
-Set a single `http.proxy` — Bun routes both **http://** and **https://** targets through it (same for Playwright browser fallback).
+`http.proxy` is one object. Bun routes both **http://** and **https://** through `url` (same for Playwright), unless the host matches `ignore`.
 
 ```yaml
 http:
-  proxy: http://127.0.0.1:7890
-  # proxy: http://user:pass@proxy.example.com:8080
-  # proxy: socks5://127.0.0.1:1080
-
-  # Corporate / self-signed MITM proxies:
-  reject_unauthorized: false
+  proxy:
+    url: http://127.0.0.1:7890
+    # url: http://user:pass@proxy.example.com:8080
+    # url: socks5://127.0.0.1:1080
+    ignore:
+      - localhost
+      - 127.0.0.1
+      - .internal          # example.com + *.example.com style via leading dot
+      - "*.corp.local"
+    reject_unauthorized: false   # corporate / self-signed MITM
 ```
 
-Leave `proxy: null` for direct connections. `reject_unauthorized: false` disables certificate verification (insecure — only when you trust the network path).
+Leave `url: null` for direct connections. Legacy flat `http.proxy: "http://…"` and `http.reject_unauthorized` are still accepted and migrated into the object.
+
+### API keys
+
+`api_key` values that start with `$` are read from the environment; anything else is used as the literal key:
+
+```yaml
+embeddings:
+  provider: openai
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key: $OPENAI_API_KEY          # → process.env.OPENAI_API_KEY
+    # api_key: sk-proj-...            # literal key in config (avoid committing)
+
+rerank:
+  enabled: true
+  provider: cohere
+  model: rerank-v3.5
+  cohere:
+    base_url: https://api.cohere.com/v2
+    api_key: $COHERE_API_KEY
+```
+
+Legacy `api_key_env: NAME` is still accepted and treated as `$NAME`.
 
 Changing `embeddings.model` (or provider) after you already indexed may require re-ingesting so vector dimensions stay consistent.
 
@@ -167,7 +197,7 @@ bun run localdoc tui
 bun run localdoc   # opens TUI when run with no args in a TTY
 ```
 
-Keys: `1–4` switch views · `j/k` or arrows browse sources · `u` update selected · `U` update all · Enter submit · Esc / **Cancel** stops a running query or ingest · `r` refresh · `q` / Ctrl+C quit.
+Keys: `1–4` switch views · `j/k` or arrows browse sources · `u` update · `U` update all · `I` reindex all (force, after embedding model change) · `d` remove · Enter submit · Esc / **Cancel** stops running work · `r` refresh · `q` / Ctrl+C quit.
 
 ## Agent skills
 

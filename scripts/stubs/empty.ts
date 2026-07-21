@@ -9,6 +9,6 @@ export const env = {
 };
 export async function pipeline(): Promise<never> {
   throw new Error(
-    "Local Transformers.js / ONNX embeddings are not bundled in the standalone binary. Set embeddings.provider to openai_compatible, or run via `bun run localdoc`.",
+    "Local Transformers.js / ONNX embeddings are not bundled in the standalone binary. Set embeddings.provider to openai, or run via `bun run localdoc`.",
   );
 }

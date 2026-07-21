@@ -1,33 +1,65 @@
 import { z } from "zod";
+import { migrateApiKeyFields } from "../util/api-key.ts";
+
+const OpenAISchema = z.preprocess(
+  (val) => {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      return migrateApiKeyFields({ ...(val as Record<string, unknown>) });
+    }
+    return val;
+  },
+  z.object({
+    base_url: z.string().default("https://api.openai.com/v1"),
+    /** `$ENV_NAME` reads from the environment; any other value is the literal key. */
+    api_key: z.string().default("$OPENAI_API_KEY"),
+    model: z.string().default("text-embedding-3-small"),
+  }),
+);
+
+const CohereRerankSchema = z.preprocess(
+  (val) => {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      return migrateApiKeyFields({ ...(val as Record<string, unknown>) });
+    }
+    return val;
+  },
+  z.object({
+    base_url: z.string().default("https://api.cohere.com/v2"),
+    /** `$ENV_NAME` reads from the environment; any other value is the literal key. */
+    api_key: z.string().default("$COHERE_API_KEY"),
+  }),
+);
 
 export const ConfigSchema = z.object({
   data_dir: z.string().default("~/.localdoc"),
-  embeddings: z
-    .object({
-      provider: z.enum(["model2vec", "openai_compatible"]).default("model2vec"),
-      model: z.string().default("minishlab/potion-base-8M"),
-      openai_compatible: z
-        .object({
-          base_url: z.string().default("https://api.openai.com/v1"),
-          api_key_env: z.string().default("OPENAI_API_KEY"),
-          model: z.string().default("text-embedding-3-small"),
-        })
-        .optional(),
-    })
-    .default({
-      provider: "model2vec",
-      model: "minishlab/potion-base-8M",
-    }),
+  embeddings: z.preprocess(
+    (val) => {
+      if (!val || typeof val !== "object" || Array.isArray(val)) return val;
+      const o = { ...(val as Record<string, unknown>) };
+      if (o.provider === "openai_compatible") o.provider = "openai";
+      if (o.openai == null && o.openai_compatible != null) {
+        o.openai = o.openai_compatible;
+      }
+      delete o.openai_compatible;
+      return o;
+    },
+    z
+      .object({
+        provider: z.enum(["model2vec", "openai"]).default("model2vec"),
+        model: z.string().default("minishlab/potion-base-8M"),
+        openai: OpenAISchema.optional(),
+      })
+      .default({
+        provider: "model2vec",
+        model: "minishlab/potion-base-8M",
+      }),
+  ),
   rerank: z
     .object({
       enabled: z.boolean().default(false),
       provider: z.enum(["none", "local", "cohere"]).default("none"),
       model: z.string().nullable().default(null),
-      cohere: z
-        .object({
-          api_key_env: z.string().default("COHERE_API_KEY"),
-        })
-        .optional(),
+      cohere: CohereRerankSchema.optional(),
     })
     .default({
       enabled: false,
@@ -78,19 +110,65 @@ export const ConfigSchema = z.object({
       headers: {},
     }),
   http: z
-    .object({
-      /** HTTP(S) proxy URL used for both http:// and https:// requests (Bun fetch + Playwright). */
-      proxy: z.string().nullable().default(null),
-      headers: z.record(z.string(), z.string()).default({}),
-      retries: z.number().int().nonnegative().default(3),
-      /** When false, skip TLS certificate verification (self-signed / corporate MITM proxies). */
-      reject_unauthorized: z.boolean().default(true),
-    })
+    .preprocess(
+      (val) => {
+        if (!val || typeof val !== "object" || Array.isArray(val)) return val;
+        const o = { ...(val as Record<string, unknown>) };
+        const flatProxy = o.proxy;
+        const flatTls = o.reject_unauthorized;
+
+        if (flatProxy === null || typeof flatProxy === "string") {
+          o.proxy = {
+            url: flatProxy ?? null,
+            ignore: [],
+            reject_unauthorized: typeof flatTls === "boolean" ? flatTls : true,
+          };
+          delete o.reject_unauthorized;
+        } else if (flatProxy && typeof flatProxy === "object" && !Array.isArray(flatProxy)) {
+          const p = { ...(flatProxy as Record<string, unknown>) };
+          if (p.reject_unauthorized == null && typeof flatTls === "boolean") {
+            p.reject_unauthorized = flatTls;
+          }
+          // Accept legacy `url` alias from `proxy: "http://..."` already handled;
+          // also map `no_proxy` → ignore if present
+          if (p.ignore == null && typeof p.no_proxy === "string") {
+            p.ignore = String(p.no_proxy)
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+          }
+          o.proxy = p;
+          delete o.reject_unauthorized;
+        }
+        return o;
+      },
+      z.object({
+        proxy: z
+          .object({
+            /** HTTP(S)/SOCKS proxy URL for both http:// and https:// targets. */
+            url: z.string().nullable().default(null),
+            /** Hosts that bypass the proxy (exact, `.domain`, or `*.domain`). */
+            ignore: z.array(z.string()).default([]),
+            /** When false, skip TLS certificate verification (insecure). */
+            reject_unauthorized: z.boolean().default(true),
+          })
+          .default({
+            url: null,
+            ignore: [],
+            reject_unauthorized: true,
+          }),
+        headers: z.record(z.string(), z.string()).default({}),
+        retries: z.number().int().nonnegative().default(3),
+      }),
+    )
     .default({
-      proxy: null,
+      proxy: {
+        url: null,
+        ignore: [],
+        reject_unauthorized: true,
+      },
       headers: {},
       retries: 3,
-      reject_unauthorized: true,
     }),
 });
 

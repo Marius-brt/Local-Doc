@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { type LoadedConfig, loadConfig } from "../config/load.ts";
 import { getDb } from "../db/client.ts";
 import { countStats } from "../db/documents.ts";
-import { listSources, type SourceRow } from "../db/sources.ts";
+import { listSources, removeSource, type SourceRow } from "../db/sources.ts";
 import { tryCreateEmbedder } from "../embed/index.ts";
 import { buildContextPack, formatPackMarkdown } from "../pack/format.ts";
 import { hybridSearch } from "../search/hybrid.ts";
@@ -72,7 +72,7 @@ function App() {
   const [updating, setUpdating] = useState(false);
   const [focus, setFocus] = useState<"nav" | "main" | "input">("main");
   const [hoveredNav, setHoveredNav] = useState<
-    View | "refresh" | "quit" | "cancel" | "update" | "update-all" | null
+    View | "refresh" | "quit" | "cancel" | "update" | "update-all" | "reindex-all" | "remove" | null
   >(null);
   const abortRef = useRef<AbortController | null>(null);
   const queryGenRef = useRef(0);
@@ -198,7 +198,7 @@ function App() {
   );
 
   const runUpdate = useCallback(
-    async (targets: string[], label: string) => {
+    async (targets: string[], label: string, recreate = false) => {
       if (targets.length === 0 || !state.loaded || !state.db || busy) return;
       abortRef.current?.abort();
       const ac = new AbortController();
@@ -211,7 +211,7 @@ function App() {
         lines.push(line);
         setUpdateLog(lines.join("\n"));
       };
-      push(`Updating ${label}…`);
+      push(`${recreate ? "Reindexing" : "Updating"} ${label}…`);
       try {
         for (let i = 0; i < targets.length; i++) {
           throwIfBusyAborted(ac.signal);
@@ -223,7 +223,7 @@ function App() {
             state.loaded.dataDir,
             target,
             {
-              recreate: false,
+              recreate,
               signal: ac.signal,
               onProgress: (p) => {
                 if (ac.signal.aborted) return;
@@ -255,6 +255,20 @@ function App() {
       }
     },
     [state.loaded, state.db, refresh, busy],
+  );
+
+  const runRemove = useCallback(
+    async (src: SourceRow) => {
+      if (!state.db || busy) return;
+      try {
+        const ok = await removeSource(state.db, src.id);
+        setUpdateLog(ok ? `Removed ${src.title || src.root_uri}` : `Source not found: ${src.id}`);
+        await refresh();
+      } catch (err) {
+        setUpdateLog(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [state.db, refresh, busy],
   );
 
   const quit = useCallback(() => {
@@ -331,6 +345,19 @@ function App() {
             `all ${state.sources.length} sources`,
           );
         }
+      }
+      if (key.name === "i" || key.name === "I") {
+        if (state.sources.length > 0) {
+          void runUpdate(
+            state.sources.map((s) => s.root_uri),
+            `all ${state.sources.length} sources`,
+            true,
+          );
+        }
+      }
+      if (key.name === "d" || key.name === "x") {
+        const src = state.sources[sourceCursor];
+        if (src) void runRemove(src);
       }
     }
   });
@@ -428,42 +455,107 @@ function App() {
         >
           {view === "sources" && (
             <box flexDirection="row" width="100%" height="100%" gap={1}>
-              <scrollbox
-                width="45%"
-                height="100%"
-                focused={focus === "main"}
-                style={{
-                  rootOptions: { backgroundColor: COLORS.panel },
-                  scrollbarOptions: {
-                    trackOptions: {
-                      foregroundColor: COLORS.accent,
-                      backgroundColor: COLORS.border,
-                    },
-                  },
-                }}
-              >
-                {state.sources.length === 0 ? (
-                  <text fg={COLORS.muted}>No sources. Press 4 to add.</text>
-                ) : (
-                  state.sources.map((s, i) => (
-                    <box
-                      key={s.id}
-                      width="100%"
-                      paddingLeft={1}
-                      backgroundColor={i === sourceCursor ? COLORS.selected : undefined}
-                      onMouseDown={() => {
-                        setSourceCursor(i);
-                        setFocus("main");
-                      }}
+              <box width="45%" height="100%" flexDirection="column" gap={1}>
+                <box flexDirection="row" width="100%" gap={1}>
+                  <box
+                    flexGrow={1}
+                    paddingLeft={1}
+                    paddingRight={1}
+                    border
+                    borderColor={hoveredNav === "update-all" ? COLORS.accent : COLORS.border}
+                    backgroundColor={hoveredNav === "update-all" ? COLORS.border : COLORS.panel}
+                    onMouseDown={() => {
+                      if (!busy && state.sources.length > 0) {
+                        void runUpdate(
+                          state.sources.map((s) => s.root_uri),
+                          `all ${state.sources.length} sources`,
+                        );
+                      }
+                    }}
+                    onMouseOver={() => setHoveredNav("update-all")}
+                    onMouseOut={() => setHoveredNav((h) => (h === "update-all" ? null : h))}
+                  >
+                    <text
+                      fg={
+                        state.sources.length === 0 || busy
+                          ? COLORS.muted
+                          : hoveredNav === "update-all"
+                            ? COLORS.text
+                            : COLORS.accent
+                      }
                     >
-                      <text fg={i === sourceCursor ? COLORS.text : COLORS.muted}>
-                        {s.kind.padEnd(7)} {s.status}
-                      </text>
-                      <text fg={COLORS.muted}>{s.root_uri}</text>
-                    </box>
-                  ))
-                )}
-              </scrollbox>
+                      U update all
+                    </text>
+                  </box>
+                  <box
+                    flexGrow={1}
+                    paddingLeft={1}
+                    paddingRight={1}
+                    border
+                    borderColor={hoveredNav === "reindex-all" ? COLORS.yellow : COLORS.border}
+                    backgroundColor={hoveredNav === "reindex-all" ? COLORS.border : COLORS.panel}
+                    onMouseDown={() => {
+                      if (!busy && state.sources.length > 0) {
+                        void runUpdate(
+                          state.sources.map((s) => s.root_uri),
+                          `all ${state.sources.length} sources`,
+                          true,
+                        );
+                      }
+                    }}
+                    onMouseOver={() => setHoveredNav("reindex-all")}
+                    onMouseOut={() => setHoveredNav((h) => (h === "reindex-all" ? null : h))}
+                  >
+                    <text
+                      fg={
+                        state.sources.length === 0 || busy
+                          ? COLORS.muted
+                          : hoveredNav === "reindex-all"
+                            ? COLORS.text
+                            : COLORS.yellow
+                      }
+                    >
+                      I reindex all
+                    </text>
+                  </box>
+                </box>
+                <scrollbox
+                  width="100%"
+                  flexGrow={1}
+                  focused={focus === "main"}
+                  style={{
+                    rootOptions: { backgroundColor: COLORS.panel },
+                    scrollbarOptions: {
+                      trackOptions: {
+                        foregroundColor: COLORS.accent,
+                        backgroundColor: COLORS.border,
+                      },
+                    },
+                  }}
+                >
+                  {state.sources.length === 0 ? (
+                    <text fg={COLORS.muted}>No sources. Press 4 to add.</text>
+                  ) : (
+                    state.sources.map((s, i) => (
+                      <box
+                        key={s.id}
+                        width="100%"
+                        paddingLeft={1}
+                        backgroundColor={i === sourceCursor ? COLORS.selected : undefined}
+                        onMouseDown={() => {
+                          setSourceCursor(i);
+                          setFocus("main");
+                        }}
+                      >
+                        <text fg={i === sourceCursor ? COLORS.text : COLORS.muted}>
+                          {s.kind.padEnd(7)} {s.status}
+                        </text>
+                        <text fg={COLORS.muted}>{s.root_uri}</text>
+                      </box>
+                    ))
+                  )}
+                </scrollbox>
+              </box>
               <box
                 flexGrow={1}
                 height="100%"
@@ -520,29 +612,24 @@ function App() {
                     paddingLeft={1}
                     paddingRight={1}
                     border
-                    borderColor={hoveredNav === "update-all" ? COLORS.accent : COLORS.border}
-                    backgroundColor={hoveredNav === "update-all" ? COLORS.border : undefined}
+                    borderColor={hoveredNav === "remove" ? COLORS.red : COLORS.border}
+                    backgroundColor={hoveredNav === "remove" ? COLORS.border : undefined}
                     onMouseDown={() => {
-                      if (!busy && state.sources.length > 0) {
-                        void runUpdate(
-                          state.sources.map((s) => s.root_uri),
-                          `all ${state.sources.length} sources`,
-                        );
-                      }
+                      if (!busy && selected) void runRemove(selected);
                     }}
-                    onMouseOver={() => setHoveredNav("update-all")}
-                    onMouseOut={() => setHoveredNav((h) => (h === "update-all" ? null : h))}
+                    onMouseOver={() => setHoveredNav("remove")}
+                    onMouseOut={() => setHoveredNav((h) => (h === "remove" ? null : h))}
                   >
                     <text
                       fg={
-                        state.sources.length === 0 || busy
+                        !selected || busy
                           ? COLORS.muted
-                          : hoveredNav === "update-all"
+                          : hoveredNav === "remove"
                             ? COLORS.text
-                            : COLORS.accent
+                            : COLORS.red
                       }
                     >
-                      U update all
+                      d remove
                     </text>
                   </box>
                   {updating && (
@@ -575,7 +662,7 @@ function App() {
                         fg={
                           updating
                             ? COLORS.yellow
-                            : line.startsWith("Done")
+                            : line.startsWith("Done") || line.startsWith("Removed")
                               ? COLORS.green
                               : COLORS.text
                         }
@@ -587,7 +674,9 @@ function App() {
                 )}
 
                 {!updating && !updateLog && (
-                  <text fg={COLORS.muted}>u update selected · U update all</text>
+                  <text fg={COLORS.muted}>
+                    u update · d remove · U update all · I reindex all (force embeddings)
+                  </text>
                 )}
               </box>
             </box>
@@ -678,9 +767,16 @@ function App() {
                   ? state.loaded.config.rerank.provider
                   : "disabled"}
               </text>
-              <text fg={COLORS.muted}>proxy: {state.loaded?.config.http.proxy ?? "none"}</text>
+              <text fg={COLORS.muted}>proxy: {state.loaded?.config.http.proxy.url ?? "none"}</text>
               <text fg={COLORS.muted}>
-                tls verify: {state.loaded?.config.http.reject_unauthorized === false ? "off" : "on"}
+                proxy ignore:{" "}
+                {state.loaded?.config.http.proxy.ignore.length
+                  ? state.loaded.config.http.proxy.ignore.join(", ")
+                  : "—"}
+              </text>
+              <text fg={COLORS.muted}>
+                tls verify:{" "}
+                {state.loaded?.config.http.proxy.reject_unauthorized === false ? "off" : "on"}
               </text>
               <text fg={COLORS.muted}>
                 playwright: {state.loaded?.config.crawl.playwright ?? "—"}

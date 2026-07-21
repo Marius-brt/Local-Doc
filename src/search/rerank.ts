@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { createCohere } from "@ai-sdk/cohere";
 import { rerank } from "ai";
 import type { LocaldocConfig } from "../config/schema.ts";
+import { resolveApiKey } from "../util/api-key.ts";
 import type { SearchHit } from "./hybrid.ts";
 
 export type RankedHit = SearchHit;
@@ -27,13 +28,11 @@ async function rerankCohere(
   hits: RankedHit[],
   config: LocaldocConfig,
 ): Promise<RankedHit[]> {
-  const envName = config.rerank.cohere?.api_key_env ?? "COHERE_API_KEY";
-  const apiKey = process.env[envName];
-  if (!apiKey) {
-    throw new Error(`Missing Cohere API key env var ${envName}`);
-  }
+  const cohereCfg = config.rerank.cohere;
+  const apiKey = resolveApiKey(cohereCfg?.api_key ?? "$COHERE_API_KEY", "Cohere rerank");
+  const baseURL = cohereCfg?.base_url ?? "https://api.cohere.com/v2";
 
-  const cohere = createCohere({ apiKey });
+  const cohere = createCohere({ apiKey, baseURL });
   const modelId = config.rerank.model ?? "rerank-v3.5";
 
   const { ranking } = await rerank({

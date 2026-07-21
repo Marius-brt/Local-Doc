@@ -14,9 +14,9 @@ data_dir: ~/.localdoc
 embeddings:
   provider: model2vec
   model: minishlab/potion-base-8M
-  # openai_compatible:
+  # openai:
   #   base_url: https://api.openai.com/v1
-  #   api_key_env: OPENAI_API_KEY
+  #   api_key: $OPENAI_API_KEY   # $ENV → env var; otherwise literal key
   #   model: text-embedding-3-small
 
 rerank:
@@ -24,7 +24,8 @@ rerank:
   provider: none
   model: null
   # cohere:
-  #   api_key_env: COHERE_API_KEY
+  #   base_url: https://api.cohere.com/v2
+  #   api_key: $COHERE_API_KEY
 
 search:
   rrf_k: 60
@@ -47,13 +48,14 @@ crawl:
   headers: {}
 
 http:
-  # One proxy for both http:// and https:// targets
-  proxy: null
-  # proxy: http://127.0.0.1:7890
+  proxy:
+    url: null
+    # url: http://127.0.0.1:7890
+    ignore: []
+    # ignore: [localhost, 127.0.0.1, "*.internal"]
+    reject_unauthorized: true
   headers: {}
   retries: 3
-  # Set false to allow self-signed / intercepting TLS (insecure)
-  reject_unauthorized: true
 `;
 
 export interface LoadedConfig {

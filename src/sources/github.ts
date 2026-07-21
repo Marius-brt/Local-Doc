@@ -111,8 +111,10 @@ export async function collectGithubViaApi(
   const title = `${parsed.owner}/${parsed.repo}`;
   const apiBase = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`;
 
+  const treeUrl = `${apiBase}/git/trees/${parsed.ref ?? "HEAD"}?recursive=1`;
   const treeInit = config
     ? buildFetchInit(config, {
+        url: treeUrl,
         signal,
         headers: {
           Accept: "application/vnd.github+json",
@@ -127,7 +129,7 @@ export async function collectGithubViaApi(
         signal,
       };
 
-  const treeRes = await fetch(`${apiBase}/git/trees/${parsed.ref ?? "HEAD"}?recursive=1`, treeInit);
+  const treeRes = await fetch(treeUrl, treeInit);
   if (!treeRes.ok) {
     throw new Error(`GitHub API tree failed: HTTP ${treeRes.status}`);
   }
@@ -156,6 +158,7 @@ export async function collectGithubViaApi(
     const rawUrl = `https://raw.githubusercontent.com/${parsed.owner}/${parsed.repo}/${parsed.ref ?? "HEAD"}/${item.path}`;
     const fileInit = config
       ? buildFetchInit(config, {
+          url: rawUrl,
           signal,
           headers: { "User-Agent": "localdoc" },
         })

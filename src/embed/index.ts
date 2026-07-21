@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { embed as aiEmbed } from "ai";
 import type { LocaldocConfig } from "../config/schema.ts";
+import { resolveApiKey } from "../util/api-key.ts";
 import { ensureModel2VecBinary } from "./model2vec-bin.ts";
 import { DEFAULT_MODEL_ID, ensureModel2VecWeights } from "./model2vec-weights.ts";
 import { ensureOnnxNatives } from "./onnx-natives.ts";
@@ -150,18 +151,13 @@ export async function loadTransformersExtractor(
 }
 
 function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
-  const oc = config.embeddings.openai_compatible;
+  const oc = config.embeddings.openai;
   if (!oc) {
-    throw new Error(
-      "embeddings.openai_compatible config is required when provider is openai_compatible",
-    );
+    throw new Error("embeddings.openai config is required when provider is openai");
   }
-  const apiKey = process.env[oc.api_key_env];
-  if (!apiKey) {
-    throw new Error(`Missing API key env var ${oc.api_key_env} for OpenAI-compatible embeddings`);
-  }
+  const apiKey = resolveApiKey(oc.api_key, "OpenAI embeddings");
   const provider = createOpenAICompatible({
-    name: "openai_compatible",
+    name: "openai",
     baseURL: oc.base_url,
     apiKey,
   });
@@ -170,7 +166,7 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
 
   return {
     get modelId() {
-      return `openai_compatible:${oc.model}`;
+      return `openai:${oc.model}`;
     },
     get dims() {
       return dims;
@@ -195,7 +191,7 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
 }
 
 export function createEmbedder(config: LocaldocConfig, dataDir: string): Embedder {
-  if (config.embeddings.provider === "openai_compatible") {
+  if (config.embeddings.provider === "openai") {
     return createOpenAIEmbedder(config);
   }
   return createModel2VecEmbedder(config, dataDir);
@@ -207,7 +203,7 @@ export async function tryCreateEmbedder(
   dataDir: string,
 ): Promise<Embedder | null> {
   try {
-    if (config.embeddings.provider === "openai_compatible") {
+    if (config.embeddings.provider === "openai") {
       return createOpenAIEmbedder(config);
     }
     return createModel2VecEmbedder(config, dataDir);

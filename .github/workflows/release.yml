@@ -62,11 +62,14 @@ jobs:
         with:
           path: artifacts
 
-      - name: Flatten artifacts
+      - name: Flatten artifacts and checksums
         run: |
           mkdir -p release
           find artifacts -type f -exec cp {} release/ \;
-          ls -la release
+          cd release
+          sha256sum localdoc-* > SHA256SUMS
+          ls -la
+          cat SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -7,7 +7,12 @@ import type { LocaldocConfig } from "../config/schema.ts";
 import { extractPage } from "../crawl/adapters/index.ts";
 import { type DiscoveryStrategy, discoverUrls } from "../crawl/discover.ts";
 import { fetchText } from "../crawl/fetch.ts";
-import { detectUrlVersion, isSkippableContentType, normalizeUrl } from "../crawl/urls.ts";
+import {
+  detectUrlVersion,
+  isSkippableContentType,
+  isUnderRoot,
+  normalizeUrl,
+} from "../crawl/urls.ts";
 import { nowIso } from "../db/client.ts";
 import {
   deleteChunksForDocument,
@@ -189,6 +194,7 @@ async function markDocumentError(
 
 async function fetchPageContent(
   url: string,
+  rootUrl: string,
   config: LocaldocConfig,
   dataDir: string,
   onBrowserProgress?: (message: string) => void,
@@ -206,10 +212,11 @@ async function fetchPageContent(
   const browserProgress = onBrowserProgress
     ? (message: string) => onBrowserProgress(message)
     : undefined;
+  const pageScope = { mode: "under-root" as const, root: rootUrl };
 
   if (mode === "always") {
     const { fetchWithPlaywright } = await import("../playwright/browser.ts");
-    const pw = await fetchWithPlaywright(url, config, dataDir, browserProgress);
+    const pw = await fetchWithPlaywright(url, config, dataDir, browserProgress, rootUrl);
     return {
       ok: pw.ok,
       finalUrl: pw.url,
@@ -220,7 +227,7 @@ async function fetchPageContent(
     };
   }
 
-  const res = await fetchText(url, config, signal);
+  const res = await fetchText(url, config, signal, pageScope);
   let html = res.body;
   let ok = res.ok;
   let finalUrl = res.url;
@@ -257,7 +264,7 @@ async function fetchPageContent(
   if (needsBrowser) {
     throwIfAborted(signal);
     const { fetchWithPlaywright } = await import("../playwright/browser.ts");
-    const pw = await fetchWithPlaywright(url, config, dataDir, browserProgress);
+    const pw = await fetchWithPlaywright(url, config, dataDir, browserProgress, rootUrl);
     if (pw.ok && pw.body) {
       html = pw.body;
       ok = true;
@@ -267,6 +274,32 @@ async function fetchPageContent(
       error = undefined;
     } else if (!ok) {
       error = pw.error ?? error;
+    }
+  }
+
+  if (ok) {
+    try {
+      const normalized = normalizeUrl(finalUrl);
+      if (!isUnderRoot(normalized, rootUrl)) {
+        return {
+          ok: false,
+          finalUrl: normalized,
+          html: "",
+          contentType,
+          usedPlaywright,
+          error: `final URL left crawl scope: ${normalized}`,
+        };
+      }
+      finalUrl = normalized;
+    } catch {
+      return {
+        ok: false,
+        finalUrl,
+        html: "",
+        contentType,
+        usedPlaywright,
+        error: `invalid final URL: ${finalUrl}`,
+      };
     }
   }
 
@@ -328,9 +361,15 @@ export async function ingestWeb(
           try {
             // Special-case llms-full.txt as markdown
             if (url.endsWith("llms-full.txt") || url.endsWith("llms.txt")) {
-              const res = await fetchText(url, config, options.signal);
+              const res = await fetchText(url, config, options.signal, {
+                mode: "under-root",
+                root: rootUrl,
+              });
               if (!res.ok) throw new Error(res.error ?? "fetch failed");
               const uri = normalizeUrl(res.url);
+              if (!isUnderRoot(uri, rootUrl)) {
+                throw new Error(`final URL left crawl scope: ${uri}`);
+              }
               keepUris.add(uri);
               const result = await indexMarkdownDoc({
                 db,
@@ -351,6 +390,7 @@ export async function ingestWeb(
 
             const fetched = await fetchPageContent(
               url,
+              rootUrl,
               config,
               dataDir,
               (message) => progress({ phase: "browser", message }),
@@ -367,6 +407,9 @@ export async function ingestWeb(
               throw new Error("boilerplate-only content");
             }
             const uri = normalizeUrl(fetched.finalUrl);
+            if (!isUnderRoot(uri, rootUrl)) {
+              throw new Error(`final URL left crawl scope: ${uri}`);
+            }
             keepUris.add(uri);
             const result = await indexMarkdownDoc({
               db,

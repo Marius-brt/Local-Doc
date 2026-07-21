@@ -1,6 +1,7 @@
 import { access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { LocaldocConfig } from "../config/schema.ts";
+import { isUnderRoot } from "../crawl/urls.ts";
 
 type Browser = import("playwright").Browser;
 
@@ -110,8 +111,17 @@ export async function fetchWithPlaywright(
   config: LocaldocConfig,
   dataDir: string,
   onProgress?: BrowserProgress,
+  scopeRoot?: string,
 ): Promise<{ ok: boolean; url: string; body: string; error?: string }> {
   try {
+    if (scopeRoot && !isUnderRoot(url, scopeRoot)) {
+      return {
+        ok: false,
+        url,
+        body: "",
+        error: `URL out of crawl scope: ${url}`,
+      };
+    }
     const browser = await getBrowser(dataDir, onProgress);
     const contextOpts: {
       userAgent: string;
@@ -139,15 +149,36 @@ export async function fetchWithPlaywright(
     const context = await browser.newContext(contextOpts);
     const page = await context.newPage();
     try {
+      if (scopeRoot) {
+        // Block document navigations that leave the crawl root (redirect SSRF).
+        await page.route("**/*", async (route) => {
+          if (route.request().resourceType() === "document") {
+            if (!isUnderRoot(route.request().url(), scopeRoot)) {
+              await route.abort("blockedbyclient");
+              return;
+            }
+          }
+          await route.continue();
+        });
+      }
       onProgress?.(`Fetching via browser: ${url}`);
       const res = await page.goto(url, {
         waitUntil: "networkidle",
         timeout: config.crawl.timeout_ms,
       });
+      const finalUrl = page.url();
+      if (scopeRoot && !isUnderRoot(finalUrl, scopeRoot)) {
+        return {
+          ok: false,
+          url: finalUrl,
+          body: "",
+          error: `final URL left crawl scope: ${finalUrl}`,
+        };
+      }
       const body = await page.content();
       return {
         ok: Boolean(res?.ok()),
-        url: page.url(),
+        url: finalUrl,
         body,
         error: res?.ok() ? undefined : `HTTP ${res?.status() ?? 0}`,
       };

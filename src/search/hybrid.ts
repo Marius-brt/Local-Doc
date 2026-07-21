@@ -314,7 +314,7 @@ export async function hybridSearch(
   filters?: SearchFilters,
 ): Promise<SearchHit[]> {
   log.info(
-    `query start q=${JSON.stringify(query.slice(0, 120))} embedder=${embedder?.modelId ?? "none"} rerank=${config.rerank.enabled ? config.rerank.provider : "off"} filters=${hasSearchFilters(filters) ? JSON.stringify({ kinds: filters?.kinds, sources: filters?.sourceIds?.length, keywords: filters?.keywords?.length }) : "none"}`,
+    `query start qLen=${query.length} q=${JSON.stringify(query.slice(0, 80))} embedder=${embedder?.modelId ?? "none"} rerank=${config.rerank.enabled ? config.rerank.provider : "off"} filters=${hasSearchFilters(filters) ? JSON.stringify({ kinds: filters?.kinds, sources: filters?.sourceIds?.length, keywords: filters?.keywords?.length }) : "none"}`,
   );
   const ftsHits = await ftsSearch(db, query, config.search.fts_limit, filters);
 

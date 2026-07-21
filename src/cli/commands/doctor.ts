@@ -140,6 +140,17 @@ export default defineCommand({
     }
     console.log(`Playwright mode: ${loaded.config.crawl.playwright}`);
     console.log(`Log level: ${loaded.config.log.level}`);
+    if (!loaded.config.http.proxy.reject_unauthorized) {
+      console.log(
+        chalk.yellow(
+          "warning: http.proxy.reject_unauthorized is false — TLS certificate verification is disabled (MITM risk)",
+        ),
+      );
+      log.warn("doctor: TLS verification disabled (reject_unauthorized=false)");
+    }
+    if (loaded.config.http.proxy.url) {
+      console.log(`HTTP proxy: ${loaded.config.http.proxy.url}`);
+    }
     log.info("doctor complete");
     console.log(chalk.green("Doctor complete."));
   },

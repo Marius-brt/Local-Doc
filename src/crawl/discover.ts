@@ -2,7 +2,13 @@ import { parseHTML } from "linkedom";
 import robotsParser from "robots-parser";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { fetchOptional, fetchText } from "./fetch.ts";
-import { dedupeVersionedUrls, filterUrlsForRoot, isUnderRoot, normalizeUrl } from "./urls.ts";
+import {
+  dedupeVersionedUrls,
+  filterUrlsForRoot,
+  isSameOrigin,
+  isUnderRoot,
+  normalizeUrl,
+} from "./urls.ts";
 
 export type DiscoveryStrategy = "llms-full.txt" | "llms.txt" | "sitemap.xml" | "nav-crawl";
 
@@ -55,8 +61,9 @@ async function discoverLlmsFull(
   signal?: AbortSignal,
 ): Promise<string[] | null> {
   const origin = originOf(root);
+  const scope = { mode: "same-origin" as const, root };
   for (const path of ["/llms-full.txt", "/docs/llms-full.txt"]) {
-    const body = await fetchOptional(origin + path, config, signal);
+    const body = await fetchOptional(origin + path, config, signal, scope);
     if (!body) continue;
     // llms-full is often one giant markdown doc — treat as single page
     if (body.length > 500 && !body.includes("http")) {
@@ -75,8 +82,9 @@ async function discoverLlms(
   signal?: AbortSignal,
 ): Promise<string[] | null> {
   const origin = originOf(root);
+  const scope = { mode: "same-origin" as const, root };
   for (const path of ["/llms.txt", "/docs/llms.txt"]) {
-    const body = await fetchOptional(origin + path, config, signal);
+    const body = await fetchOptional(origin + path, config, signal, scope);
     if (!body) continue;
     const urls = parseLlmsTxt(body, origin);
     if (urls.length > 0) return urls.slice(0, config.crawl.max_pages);
@@ -86,11 +94,13 @@ async function discoverLlms(
 
 async function parseSitemapUrls(
   xml: string,
+  root: string,
   config: LocaldocConfig,
   depth = 0,
   signal?: AbortSignal,
 ): Promise<string[]> {
   if (depth > 3) return [];
+  const scope = { mode: "same-origin" as const, root };
   const urls: string[] = [];
   const locRegex = /<loc>\s*([^<]+)\s*<\/loc>/gi;
   let match: RegExpExecArray | null;
@@ -102,9 +112,11 @@ async function parseSitemapUrls(
   for (const loc of locs) {
     if (urls.length >= config.crawl.max_pages) break;
     if (loc.endsWith(".xml") || loc.includes("sitemap")) {
-      const child = await fetchOptional(loc, config, signal);
+      // Nested sitemap fetches: same-origin only (blocks SSRF to other hosts).
+      if (!isSameOrigin(loc, root)) continue;
+      const child = await fetchOptional(loc, config, signal, scope);
       if (child) {
-        const nested = await parseSitemapUrls(child, config, depth + 1, signal);
+        const nested = await parseSitemapUrls(child, root, config, depth + 1, signal);
         for (const u of nested) {
           if (urls.length >= config.crawl.max_pages) break;
           urls.push(u);
@@ -123,6 +135,7 @@ async function discoverSitemap(
   signal?: AbortSignal,
 ): Promise<string[] | null> {
   const origin = originOf(root);
+  const scope = { mode: "same-origin" as const, root };
   const candidates = [
     `${origin}/sitemap.xml`,
     `${origin}/sitemap_index.xml`,
@@ -130,9 +143,10 @@ async function discoverSitemap(
     new URL("/sitemap.xml", root).toString(),
   ];
   for (const candidate of [...new Set(candidates)]) {
-    const body = await fetchOptional(candidate, config, signal);
+    if (!isSameOrigin(candidate, root)) continue;
+    const body = await fetchOptional(candidate, config, signal, scope);
     if (!body?.includes("<loc>")) continue;
-    const urls = await parseSitemapUrls(body, config);
+    const urls = await parseSitemapUrls(body, root, config, 0, signal);
     if (urls.length > 0) return urls.slice(0, config.crawl.max_pages);
   }
   return null;
@@ -189,11 +203,12 @@ async function discoverNavCrawl(
   const queue: string[] = [rootNorm];
   const results: string[] = [];
 
+  const pageScope = { mode: "under-root" as const, root: rootNorm };
   while (queue.length > 0 && results.length < config.crawl.max_pages) {
     const url = queue.shift()!;
     if (seen.has(url)) continue;
     seen.add(url);
-    const res = await fetchText(url, config, signal);
+    const res = await fetchText(url, config, signal, pageScope);
     if (!res.ok) continue;
     let finalUrl = res.url;
     try {
@@ -220,7 +235,10 @@ export async function loadRobots(
 ): Promise<{ isAllowed: (url: string) => boolean } | null> {
   if (!config.crawl.respect_robots) return null;
   const origin = originOf(root);
-  const body = await fetchOptional(`${origin}/robots.txt`, config, signal);
+  const body = await fetchOptional(`${origin}/robots.txt`, config, signal, {
+    mode: "same-origin",
+    root,
+  });
   if (!body) return null;
   const robots = robotsParser(`${origin}/robots.txt`, body);
   return {

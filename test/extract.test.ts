@@ -3,9 +3,12 @@ import { extractPage } from "../src/crawl/adapters/index.ts";
 import {
   dedupeVersionedUrls,
   filterUrlsForRoot,
+  isSameOrigin,
   isSkippableContentType,
+  isUnderRoot,
   normalizeUrl,
   stripVersionPath,
+  urlInFetchScope,
 } from "../src/crawl/urls.ts";
 import { EXTRACTOR_VERSION, htmlToMarkdown, isBoilerplateOnly } from "../src/extract/html.ts";
 import { normalizeTitle, sanitizeMarkdown } from "../src/extract/sanitize.ts";
@@ -95,6 +98,22 @@ describe("url helpers", () => {
       "https://ex.com/docs/a",
       "https://ex.com/docs/v1/c",
     ]);
+  });
+
+  test("isSameOrigin / isUnderRoot / urlInFetchScope", () => {
+    expect(isSameOrigin("https://ex.com/sitemap.xml", "https://ex.com/docs")).toBe(true);
+    expect(isSameOrigin("http://169.254.169.254/", "https://ex.com/docs")).toBe(false);
+    expect(isUnderRoot("https://ex.com/docs/a", "https://ex.com/docs")).toBe(true);
+    expect(isUnderRoot("https://ex.com/blog", "https://ex.com/docs")).toBe(false);
+    expect(
+      urlInFetchScope("https://ex.com/sitemap.xml", { mode: "same-origin", root: "https://ex.com/docs" }),
+    ).toBe(true);
+    expect(
+      urlInFetchScope("https://evil.com/x", { mode: "same-origin", root: "https://ex.com/docs" }),
+    ).toBe(false);
+    expect(
+      urlInFetchScope("https://ex.com/blog", { mode: "under-root", root: "https://ex.com/docs" }),
+    ).toBe(false);
   });
 
   test("dedupeVersionedUrls prefers unversioned", () => {

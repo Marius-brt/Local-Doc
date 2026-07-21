@@ -15,6 +15,15 @@ export function normalizeUrl(url: string): string {
   return u.toString();
 }
 
+/** True when `url` shares scheme+host+port with `root`. */
+export function isSameOrigin(url: string, root: string): boolean {
+  try {
+    return new URL(normalizeUrl(url)).origin === new URL(normalizeUrl(root)).origin;
+  } catch {
+    return false;
+  }
+}
+
 /** True when `url` is under the path prefix of `root` (same origin). */
 export function isUnderRoot(url: string, root: string): boolean {
   let u: URL;
@@ -29,6 +38,16 @@ export function isUnderRoot(url: string, root: string): boolean {
   const rootPath = r.pathname === "/" ? "" : r.pathname.replace(/\/$/, "");
   if (!rootPath) return true;
   return u.pathname === rootPath || u.pathname.startsWith(`${rootPath}/`);
+}
+
+/** Crawl fetch scope: path-bounded pages vs same-origin discovery artifacts. */
+export type FetchScope =
+  | { mode: "under-root"; root: string }
+  | { mode: "same-origin"; root: string };
+
+export function urlInFetchScope(url: string, scope: FetchScope): boolean {
+  if (scope.mode === "under-root") return isUnderRoot(url, scope.root);
+  return isSameOrigin(url, scope.root);
 }
 
 const VERSION_SEGMENT = /^(v?\d+\.\d+(?:\.\d+)?(?:-[a-z0-9.]+)?|latest|stable|master|main)$/i;

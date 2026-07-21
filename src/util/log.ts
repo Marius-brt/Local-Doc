@@ -15,16 +15,31 @@ let minLevel: LogLevel = "info";
 let logFilePath: string | null = null;
 let writeQueue: Promise<void> = Promise.resolve();
 
+/** Redact bearer tokens, API keys, and long opaque secrets from log lines. */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/(Authorization:\s*Bearer\s+)(\S+)/gi, "$1***")
+    .replace(/(Bearer\s+)([A-Za-z0-9._\-+/=]{8,})/g, "$1***")
+    .replace(
+      /\b(api[_-]?key|token|secret|password)\b([=:]\s*)(["']?)([^\s"'\\]{6,})\3/gi,
+      "$1$2$3***$3",
+    )
+    .replace(
+      /\b(sk-[A-Za-z0-9]{10,}|sk-proj-[A-Za-z0-9_-]{10,}|co_[A-Za-z0-9]{10,})\b/g,
+      "***",
+    );
+}
+
 function formatLine(level: LogLevel, message: string): string {
   const ts = new Date().toISOString();
-  return `${ts} [${level.toUpperCase()}] ${message}\n`;
+  return `${ts} [${level.toUpperCase()}] ${redactSecrets(message)}\n`;
 }
 
 function enqueueWrite(line: string): void {
   if (!logFilePath) return;
   const path = logFilePath;
   writeQueue = writeQueue
-    .then(() => appendFile(path, line, "utf8"))
+    .then(() => appendFile(path, line, { encoding: "utf8", mode: 0o600 }))
     .catch((err) => {
       // Avoid recursive logging; surface once on stderr.
       console.error(
@@ -50,7 +65,7 @@ export async function flushLog(): Promise<void> {
 /** Best-effort string for logging thrown values (incl. AI SDK response bodies). */
 export function formatError(err: unknown): string {
   if (err == null) return String(err);
-  if (typeof err === "string") return err;
+  if (typeof err === "string") return redactSecrets(err);
   if (err instanceof Error) {
     const parts = [err.message];
     const extra = err as Error & {
@@ -64,23 +79,23 @@ export function formatError(err: unknown): string {
     if (extra.statusCode != null) parts.push(`status=${extra.statusCode}`);
     if (extra.url) parts.push(`url=${extra.url}`);
     if (extra.responseBody) {
-      parts.push(`body=${String(extra.responseBody).slice(0, 800)}`);
+      parts.push(`body=${String(extra.responseBody).slice(0, 200)}`);
     } else if (typeof extra.text === "string" && extra.text) {
-      parts.push(`body=${extra.text.slice(0, 800)}`);
+      parts.push(`body=${extra.text.slice(0, 200)}`);
     } else if (extra.data != null) {
       try {
-        parts.push(`data=${JSON.stringify(extra.data).slice(0, 800)}`);
+        parts.push(`data=${JSON.stringify(extra.data).slice(0, 200)}`);
       } catch {
         // ignore
       }
     }
     if (extra.cause != null) parts.push(`cause=${formatError(extra.cause)}`);
-    return parts.join(" | ");
+    return redactSecrets(parts.join(" | "));
   }
   try {
-    return JSON.stringify(err);
+    return redactSecrets(JSON.stringify(err));
   } catch {
-    return String(err);
+    return redactSecrets(String(err));
   }
 }
 
@@ -105,7 +120,7 @@ export async function initLog(options: {
   const expanded = expandHome(relativeOrAbs);
   const path = isAbsolute(expanded) ? expanded : join(options.dataDir, expanded);
   try {
-    await mkdir(dirname(path), { recursive: true });
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     logFilePath = path;
     enqueueWrite(formatLine("info", `——— localdoc session start (level=${minLevel}) ———`));
     return logFilePath;

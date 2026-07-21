@@ -39,9 +39,12 @@ PREFIX=/usr/local/bin bash install.sh
 
 # Alpine / musl (auto-detected; override if needed)
 LOCALDOC_LIBC=musl bash install.sh
+
+# Skip SHA256 verification (not recommended; for older releases without SHA256SUMS)
+LOCALDOC_SKIP_VERIFY=1 bash install.sh
 ```
 
-Published assets: `localdoc-darwin-arm64`, `localdoc-linux-x64`, `localdoc-linux-x64-musl`, `localdoc-windows-x64.exe`.
+Published assets: `localdoc-darwin-arm64`, `localdoc-linux-x64`, `localdoc-linux-x64-musl`, `localdoc-windows-x64.exe`, plus `SHA256SUMS` (installer verifies the download).
 
 On Windows, download `localdoc-windows-x64.exe` from [Releases](https://github.com/Marius-brt/Local-Doc/releases) and put it on your `PATH`.
 
@@ -70,11 +73,12 @@ embeddings:
   provider: model2vec          # model2vec | openai
   model: minishlab/potion-base-8M
   batch_size: 20
+  base_url: null               # openai provider: e.g. https://api.openai.com/v1
+  api_key: null                # $ENV or literal; optional for local servers
   # provider: openai
   # model: text-embedding-3-small
-  # openai:
-  #   base_url: https://api.openai.com/v1
-  #   api_key: $OPENAI_API_KEY   # $ENV → env; else literal key
+  # base_url: https://api.openai.com/v1
+  # api_key: $OPENAI_API_KEY
 
 rerank:
   enabled: false
@@ -164,10 +168,9 @@ Leave `url: null` for direct connections. Legacy flat `http.proxy: "http://…"`
 embeddings:
   provider: openai
   model: text-embedding-3-small
-  openai:
-    base_url: https://api.openai.com/v1
-    api_key: $OPENAI_API_KEY          # → process.env.OPENAI_API_KEY
-    # api_key: sk-proj-...            # literal key in config (avoid committing)
+  base_url: https://api.openai.com/v1
+  api_key: $OPENAI_API_KEY          # → process.env.OPENAI_API_KEY
+  # api_key: sk-proj-...            # literal key in config (avoid committing)
 
 rerank:
   enabled: true

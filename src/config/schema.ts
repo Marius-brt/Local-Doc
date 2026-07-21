@@ -1,20 +1,6 @@
 import { z } from "zod";
 import { migrateApiKeyFields } from "../util/api-key.ts";
 
-const OpenAISchema = z.preprocess(
-  (val) => {
-    if (val && typeof val === "object" && !Array.isArray(val)) {
-      return migrateApiKeyFields({ ...(val as Record<string, unknown>) });
-    }
-    return val;
-  },
-  z.object({
-    base_url: z.string().default("https://api.openai.com/v1"),
-    /** `$ENV_NAME` reads from the environment; any other value is the literal key. */
-    api_key: z.string().default("$OPENAI_API_KEY"),
-  }),
-);
-
 function migrateRerankConfig(val: unknown): unknown {
   if (!val || typeof val !== "object" || Array.isArray(val)) return val;
   const o = migrateApiKeyFields({ ...(val as Record<string, unknown>) });
@@ -33,35 +19,44 @@ function migrateRerankConfig(val: unknown): unknown {
   return o;
 }
 
+/** Flatten legacy embeddings.openai / openai_compatible into top-level fields. */
+function migrateEmbeddingsConfig(val: unknown): unknown {
+  if (!val || typeof val !== "object" || Array.isArray(val)) return val;
+  const o = migrateApiKeyFields({ ...(val as Record<string, unknown>) });
+  if (o.provider === "openai_compatible") o.provider = "openai";
+
+  const nested =
+    (o.openai && typeof o.openai === "object" && !Array.isArray(o.openai) && o.openai) ||
+    (o.openai_compatible &&
+      typeof o.openai_compatible === "object" &&
+      !Array.isArray(o.openai_compatible) &&
+      o.openai_compatible) ||
+    null;
+
+  if (nested) {
+    const openai = migrateApiKeyFields({ ...(nested as Record<string, unknown>) });
+    if (typeof openai.model === "string" && openai.model) {
+      const topModel = typeof o.model === "string" ? o.model : "";
+      if (!topModel || topModel === "minishlab/potion-base-8M") {
+        o.model = openai.model;
+      }
+    }
+    if (o.base_url == null && typeof openai.base_url === "string") {
+      o.base_url = openai.base_url;
+    }
+    if (o.api_key == null && typeof openai.api_key === "string") {
+      o.api_key = openai.api_key;
+    }
+  }
+  delete o.openai;
+  delete o.openai_compatible;
+  return o;
+}
+
 export const ConfigSchema = z.object({
   data_dir: z.string().default("~/.localdoc"),
   embeddings: z.preprocess(
-    (val) => {
-      if (!val || typeof val !== "object" || Array.isArray(val)) return val;
-      const o = { ...(val as Record<string, unknown>) };
-      if (o.provider === "openai_compatible") o.provider = "openai";
-      if (o.openai == null && o.openai_compatible != null) {
-        o.openai = o.openai_compatible;
-      }
-      delete o.openai_compatible;
-      // Promote legacy embeddings.openai.model → embeddings.model
-      if (o.openai && typeof o.openai === "object" && !Array.isArray(o.openai)) {
-        const openai = { ...(o.openai as Record<string, unknown>) };
-        if (typeof openai.model === "string" && openai.model) {
-          const topModel = typeof o.model === "string" ? o.model : "";
-          const isDefaultLocal =
-            !topModel || topModel === "minishlab/potion-base-8M" || o.provider === "openai";
-          if (isDefaultLocal && (o.provider === "openai" || !topModel)) {
-            if (!topModel || topModel === "minishlab/potion-base-8M") {
-              o.model = openai.model;
-            }
-          }
-        }
-        delete openai.model;
-        o.openai = openai;
-      }
-      return o;
-    },
+    migrateEmbeddingsConfig,
     z
       .object({
         provider: z.enum(["model2vec", "openai"]).default("model2vec"),
@@ -69,12 +64,17 @@ export const ConfigSchema = z.object({
         model: z.string().default("minishlab/potion-base-8M"),
         /** Texts per embedding API / sidecar call. */
         batch_size: z.number().int().positive().default(20),
-        openai: OpenAISchema.optional(),
+        /** OpenAI-compatible API base (used when provider is openai). */
+        base_url: z.string().nullable().default(null),
+        /** `$ENV_NAME` or literal; optional for local openai-compatible servers. */
+        api_key: z.string().nullable().default(null),
       })
       .default({
         provider: "model2vec",
         model: "minishlab/potion-base-8M",
         batch_size: 20,
+        base_url: null,
+        api_key: null,
       }),
   ),
   rerank: z.preprocess(

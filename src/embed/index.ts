@@ -3,7 +3,8 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { embed as aiEmbed, embedMany } from "ai";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { resolveApiKey } from "../util/api-key.ts";
-import { log } from "../util/log.ts";
+import { formatError, log } from "../util/log.ts";
+import { normalizeOpenAICompatibleBaseUrl } from "../util/openai-url.ts";
 import { ensureModel2VecBinary } from "./model2vec-bin.ts";
 import { DEFAULT_MODEL_ID, ensureModel2VecWeights } from "./model2vec-weights.ts";
 import { ensureOnnxNatives } from "./onnx-natives.ts";
@@ -186,16 +187,26 @@ export async function loadTransformersExtractor(
   return transformersCache;
 }
 
-function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
-  const oc = config.embeddings.openai;
-  if (!oc) {
-    throw new Error("embeddings.openai config is required when provider is openai");
+function resolveOpenAIEmbeddingsApiKey(config: LocaldocConfig): string {
+  const raw = config.embeddings.api_key?.trim();
+  if (raw) {
+    return resolveApiKey(raw, "OpenAI embeddings");
   }
+  if (process.env.OPENAI_API_KEY) {
+    return process.env.OPENAI_API_KEY;
+  }
+  // Local servers (LM Studio, etc.) often ignore the key; still send a placeholder.
+  return "localdoc";
+}
+
+function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
   const modelId = config.embeddings.model || "text-embedding-3-small";
-  const apiKey = resolveApiKey(oc.api_key, "OpenAI embeddings");
+  const rawBase = config.embeddings.base_url?.trim() || "https://api.openai.com/v1";
+  const baseURL = normalizeOpenAICompatibleBaseUrl(rawBase);
+  const apiKey = resolveOpenAIEmbeddingsApiKey(config);
   const provider = createOpenAICompatible({
     name: "openai",
-    baseURL: oc.base_url,
+    baseURL,
     apiKey,
   });
   const model = provider.embeddingModel(modelId);
@@ -216,24 +227,32 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
       for (let i = 0; i < texts.length; i += batchSize) {
         throwIfEmbedAborted(signal);
         const batch = texts.slice(i, i + batchSize);
-        if (batch.length === 1) {
-          const { embedding } = await aiEmbed({
-            model,
-            value: batch[0]!,
-            abortSignal: signal,
-          });
-          dims = embedding.length;
-          out.push(Float32Array.from(embedding));
-        } else {
-          const { embeddings } = await embedMany({
-            model,
-            values: batch,
-            abortSignal: signal,
-          });
-          for (const embedding of embeddings) {
+        try {
+          if (batch.length === 1) {
+            const { embedding } = await aiEmbed({
+              model,
+              value: batch[0]!,
+              abortSignal: signal,
+            });
             dims = embedding.length;
             out.push(Float32Array.from(embedding));
+          } else {
+            const { embeddings } = await embedMany({
+              model,
+              values: batch,
+              abortSignal: signal,
+            });
+            for (const embedding of embeddings) {
+              dims = embedding.length;
+              out.push(Float32Array.from(embedding));
+            }
           }
+        } catch (err) {
+          throwIfEmbedAborted(signal);
+          const detail = formatError(err);
+          const msg = `OpenAI embeddings failed (model=${modelId} base_url=${baseURL}): ${detail}`;
+          log.error(msg);
+          throw new Error(msg, { cause: err });
         }
       }
       return out;

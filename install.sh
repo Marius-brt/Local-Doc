@@ -12,6 +12,7 @@
 #   LOCALDOC_LIBC      Force linux libc: gnu | musl
 #   PREFIX             Install directory (default: ~/.local/bin)
 #   LOCALDOC_BIN_NAME  Installed binary name (default: localdoc)
+#   LOCALDOC_SKIP_VERIFY  Set to 1 to skip SHA256 verification (not recommended)
 set -euo pipefail
 
 REPO="${LOCALDOC_REPO:-Marius-brt/Local-Doc}"
@@ -74,9 +75,9 @@ detect_asset() {
 }
 
 parse_release() {
-  # Prints: <tag> <download-url>
+  # Prints: <tag> <download-url> <checksums-url-or-empty>
   local asset="$1"
-  local api_url json tag url
+  local api_url json tag url sums_url
 
   if [ -n "$VERSION" ]; then
     case "$VERSION" in
@@ -102,6 +103,7 @@ parse_release() {
   if command -v jq >/dev/null 2>&1; then
     tag="$(printf '%s' "$json" | jq -r '.tag_name // empty')"
     url="$(printf '%s' "$json" | jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .browser_download_url' | head -1)"
+    sums_url="$(printf '%s' "$json" | jq -r '.assets[] | select(.name=="SHA256SUMS") | .browser_download_url' | head -1)"
   elif command -v python3 >/dev/null 2>&1; then
     tag="$(LOCALDOC_JSON="$json" python3 -c 'import json,os; print(json.loads(os.environ["LOCALDOC_JSON"]).get("tag_name") or "")')"
     url="$(LOCALDOC_JSON="$json" LOCALDOC_ASSET="$asset" python3 -c '
@@ -110,6 +112,14 @@ o = json.loads(os.environ["LOCALDOC_JSON"])
 n = os.environ["LOCALDOC_ASSET"]
 for a in o.get("assets") or []:
     if a.get("name") == n:
+        print(a.get("browser_download_url") or "")
+        break
+')"
+    sums_url="$(LOCALDOC_JSON="$json" python3 -c '
+import json, os
+o = json.loads(os.environ["LOCALDOC_JSON"])
+for a in o.get("assets") or []:
+    if a.get("name") == "SHA256SUMS":
         print(a.get("browser_download_url") or "")
         break
 ')"
@@ -123,8 +133,36 @@ for a in o.get("assets") or []:
   if [ -z "${url:-}" ] || [ "$url" = "null" ]; then
     url="https://github.com/${REPO}/releases/download/${tag}/${asset}"
   fi
+  if [ -z "${sums_url:-}" ] || [ "$sums_url" = "null" ]; then
+    sums_url="https://github.com/${REPO}/releases/download/${tag}/SHA256SUMS"
+  fi
 
-  printf '%s %s\n' "$tag" "$url"
+  printf '%s %s %s\n' "$tag" "$url" "$sums_url"
+}
+
+verify_sha256() {
+  local file="$1"
+  local sums_file="$2"
+  local asset="$3"
+  local expected actual
+
+  expected="$(awk -v n="$asset" '$2 == n { print $1; exit }' "$sums_file")"
+  if [ -z "$expected" ]; then
+    die "SHA256SUMS has no entry for ${asset}"
+  fi
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$file" | awk '{ print $1 }')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$file" | awk '{ print $1 }')"
+  else
+    die "need sha256sum or shasum to verify download"
+  fi
+
+  if [ "$actual" != "$expected" ]; then
+    die "checksum mismatch for ${asset}: expected ${expected}, got ${actual}"
+  fi
+  info "Checksum OK (${actual})"
 }
 
 main() {
@@ -135,17 +173,26 @@ main() {
   need_cmd tr
 
   bold "localdoc installer"
-  local asset tag url tmp dest
+  local asset tag url sums_url tmp sums_tmp dest
   asset="$(detect_asset)"
   info "Platform asset: ${asset}"
 
-  read -r tag url < <(parse_release "$asset")
+  read -r tag url sums_url < <(parse_release "$asset")
   info "Release: ${tag}"
   info "URL: ${url}"
 
   tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' EXIT
+  sums_tmp="$(mktemp)"
+  trap 'rm -f "$tmp" "$sums_tmp"' EXIT
   curl -fL --progress-bar -o "$tmp" "$url" || die "download failed — is ${asset} attached to ${tag}?"
+
+  if [ "${LOCALDOC_SKIP_VERIFY:-}" = "1" ]; then
+    warn "Skipping SHA256 verification (LOCALDOC_SKIP_VERIFY=1)"
+  else
+    info "Verifying SHA256…"
+    curl -fsSL -o "$sums_tmp" "$sums_url" || die "failed to download SHA256SUMS from ${sums_url} (re-release with checksums, or set LOCALDOC_SKIP_VERIFY=1)"
+    verify_sha256 "$tmp" "$sums_tmp" "$asset"
+  fi
 
   mkdir -p "$PREFIX"
   dest="${PREFIX}/${BIN_NAME}"

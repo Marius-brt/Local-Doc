@@ -6,6 +6,7 @@ import pLimit from "p-limit";
 import { extractPage } from "../../crawl/adapters/index.ts";
 import { discoverUrls } from "../../crawl/discover.ts";
 import { fetchText } from "../../crawl/fetch.ts";
+import { isUnderRoot, normalizeUrl } from "../../crawl/urls.ts";
 import { shortId } from "../../util/hash.ts";
 import { createCtx } from "../context.ts";
 
@@ -29,7 +30,8 @@ export default defineCommand({
     const outDir = String(args.output);
     await mkdir(outDir, { recursive: true });
 
-    const discovery = await discoverUrls(String(args.url), ctx.loaded.config);
+    const rootUrl = String(args.url);
+    const discovery = await discoverUrls(rootUrl, ctx.loaded.config);
     console.log(`Fetching ${discovery.urls.length} pages via ${discovery.strategy} → ${outDir}`);
 
     const limit = pLimit(ctx.loaded.config.crawl.concurrency);
@@ -37,19 +39,29 @@ export default defineCommand({
     await Promise.all(
       discovery.urls.map((url) =>
         limit(async () => {
-          const res = await fetchText(url, ctx.loaded.config);
+          const res = await fetchText(url, ctx.loaded.config, undefined, {
+            mode: "under-root",
+            root: rootUrl,
+          });
           if (!res.ok) return;
+          let finalUrl = res.url;
+          try {
+            finalUrl = normalizeUrl(res.url);
+          } catch {
+            return;
+          }
+          if (!isUnderRoot(finalUrl, rootUrl)) return;
           let markdown = res.body;
           let title = url;
           if (!url.endsWith(".txt") && res.contentType.includes("html")) {
-            const extracted = extractPage(res.body, res.url);
+            const extracted = extractPage(res.body, finalUrl);
             markdown = extracted.markdown;
             title = extracted.title;
           }
-          const file = join(outDir, `${shortId(res.url)}.md`);
+          const file = join(outDir, `${shortId(finalUrl)}.md`);
           await writeFile(
             file,
-            `---\ntitle: ${JSON.stringify(title)}\nsource: ${res.url}\n---\n\n${markdown}\n`,
+            `---\ntitle: ${JSON.stringify(title)}\nsource: ${finalUrl}\n---\n\n${markdown}\n`,
             "utf8",
           );
           ok++;

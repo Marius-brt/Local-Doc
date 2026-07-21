@@ -16,9 +16,12 @@ embeddings:
   provider: model2vec
   model: minishlab/potion-base-8M
   batch_size: 20
-  # openai:
-  #   base_url: https://api.openai.com/v1
-  #   api_key: $OPENAI_API_KEY   # $ENV → env var; otherwise literal key
+  base_url: null
+  api_key: null
+  # provider: openai
+  # model: text-embedding-3-small
+  # base_url: https://api.openai.com/v1   # LM Studio: http://127.0.0.1:1234/v1
+  # api_key: $OPENAI_API_KEY   # $ENV → env var; otherwise literal key
 
 rerank:
   enabled: false
@@ -93,8 +96,8 @@ export async function loadConfig(overridePath?: string): Promise<LoadedConfig> {
   let raw: unknown = {};
 
   if (!(await exists(configPath))) {
-    await mkdir(dirname(configPath), { recursive: true });
-    await writeFile(configPath, DEFAULT_CONFIG_YAML, "utf8");
+    await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+    await writeFile(configPath, DEFAULT_CONFIG_YAML, { encoding: "utf8", mode: 0o600 });
     created = true;
     raw = parseYaml(DEFAULT_CONFIG_YAML) ?? {};
   } else {
@@ -104,11 +107,11 @@ export async function loadConfig(overridePath?: string): Promise<LoadedConfig> {
 
   const config = ConfigSchema.parse(raw);
   const dataDir = expandHome(config.data_dir || defaultDataDir());
-  await mkdir(dataDir, { recursive: true });
-  await mkdir(join(dataDir, "models"), { recursive: true });
-  await mkdir(join(dataDir, "cache"), { recursive: true });
-  await mkdir(join(dataDir, "extracted"), { recursive: true });
-  await mkdir(join(dataDir, "browsers"), { recursive: true });
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  await mkdir(join(dataDir, "models"), { recursive: true, mode: 0o700 });
+  await mkdir(join(dataDir, "cache"), { recursive: true, mode: 0o700 });
+  await mkdir(join(dataDir, "extracted"), { recursive: true, mode: 0o700 });
+  await mkdir(join(dataDir, "browsers"), { recursive: true, mode: 0o700 });
   await initLog({
     dataDir,
     level: config.log.level,
@@ -124,14 +127,14 @@ export async function resetConfig(
 ): Promise<{ configPath: string; existed: boolean }> {
   const configPath = resolveConfigPath(overridePath);
   const existed = await exists(configPath);
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(configPath, DEFAULT_CONFIG_YAML, "utf8");
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  await writeFile(configPath, DEFAULT_CONFIG_YAML, { encoding: "utf8", mode: 0o600 });
   return { configPath, existed };
 }
 
 export async function saveConfig(configPath: string, config: LocaldocConfig): Promise<void> {
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(configPath, stringifyYaml(config), "utf8");
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  await writeFile(configPath, stringifyYaml(config), { encoding: "utf8", mode: 0o600 });
 }
 
 export function dbPath(dataDir: string): string {

@@ -1,6 +1,7 @@
 import pRetry from "p-retry";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { resolveProxyUrl } from "../util/proxy.ts";
+import { type FetchScope, urlInFetchScope } from "./urls.ts";
 
 export interface FetchResult {
   ok: boolean;
@@ -58,10 +59,32 @@ export function buildFetchInit(
   return init;
 }
 
+function resolveRedirectUrl(current: string, location: string): string | null {
+  try {
+    return new URL(location, current).toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchOnce(
+  url: string,
+  config: LocaldocConfig,
+  signal: AbortSignal | undefined,
+  redirect: RequestRedirect,
+): Promise<Response> {
+  return fetch(url, buildFetchInit(config, { url, signal, redirect }));
+}
+
+/**
+ * Fetch text. When `scope` is set, redirects are followed manually and only
+ * when each hop stays in scope (blocks SSRF via redirect / off-site locs).
+ */
 export async function fetchText(
   url: string,
   config: LocaldocConfig,
   signal?: AbortSignal,
+  scope?: FetchScope,
 ): Promise<FetchResult> {
   try {
     const result = await pRetry(
@@ -71,15 +94,88 @@ export async function fetchText(
           err.name = "AbortError";
           throw err;
         }
-        const res = await fetch(url, buildFetchInit(config, { url, signal }));
-        const body = await res.text();
+
+        if (scope && !urlInFetchScope(url, scope)) {
+          return {
+            ok: false,
+            status: 0,
+            url,
+            body: "",
+            contentType: "",
+            error: `URL out of crawl scope: ${url}`,
+          } satisfies FetchResult;
+        }
+
+        if (!scope) {
+          const res = await fetchOnce(url, config, signal, "follow");
+          const body = await res.text();
+          return {
+            ok: res.ok,
+            status: res.status,
+            url: res.url || url,
+            body,
+            contentType: res.headers.get("content-type") ?? "",
+            error: res.ok ? undefined : `HTTP ${res.status}`,
+          } satisfies FetchResult;
+        }
+
+        const maxRedirects = 10;
+        let current = url;
+        for (let hop = 0; hop <= maxRedirects; hop++) {
+          if (!urlInFetchScope(current, scope)) {
+            return {
+              ok: false,
+              status: 0,
+              url: current,
+              body: "",
+              contentType: "",
+              error: `redirect left crawl scope: ${current}`,
+            } satisfies FetchResult;
+          }
+          const res = await fetchOnce(current, config, signal, "manual");
+          if (res.status >= 300 && res.status < 400) {
+            const location = res.headers.get("location");
+            if (!location) {
+              return {
+                ok: false,
+                status: res.status,
+                url: current,
+                body: "",
+                contentType: "",
+                error: `HTTP ${res.status} redirect without Location`,
+              } satisfies FetchResult;
+            }
+            const next = resolveRedirectUrl(current, location);
+            if (!next) {
+              return {
+                ok: false,
+                status: res.status,
+                url: current,
+                body: "",
+                contentType: "",
+                error: `invalid redirect Location: ${location}`,
+              } satisfies FetchResult;
+            }
+            current = next;
+            continue;
+          }
+          const body = await res.text();
+          return {
+            ok: res.ok,
+            status: res.status,
+            url: res.url || current,
+            body,
+            contentType: res.headers.get("content-type") ?? "",
+            error: res.ok ? undefined : `HTTP ${res.status}`,
+          } satisfies FetchResult;
+        }
         return {
-          ok: res.ok,
-          status: res.status,
-          url: res.url || url,
-          body,
-          contentType: res.headers.get("content-type") ?? "",
-          error: res.ok ? undefined : `HTTP ${res.status}`,
+          ok: false,
+          status: 0,
+          url: current,
+          body: "",
+          contentType: "",
+          error: "too many redirects",
         } satisfies FetchResult;
       },
       {
@@ -115,8 +211,9 @@ export async function fetchOptional(
   url: string,
   config: LocaldocConfig,
   signal?: AbortSignal,
+  scope?: FetchScope,
 ): Promise<string | null> {
-  const res = await fetchText(url, config, signal);
+  const res = await fetchText(url, config, signal, scope);
   if (!res.ok || !res.body.trim()) return null;
   return res.body;
 }

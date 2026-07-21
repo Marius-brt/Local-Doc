@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "localdoc": {
+      "command": "bun",
+      "args": ["run", "src/cli/index.ts", "mcp", "serve"]
+    }
+  }
+}

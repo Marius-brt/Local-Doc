@@ -1,0 +1,104 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Source {
+  id        String   @id
+  kind      String
+  rootUri   String   @unique @map("root_uri")
+  title     String?
+  strategy  String?
+  status    String   @default("pending")
+  metaJson  String   @default("{}") @map("meta_json")
+  createdAt String   @map("created_at")
+  updatedAt String   @map("updated_at")
+  documents Document[]
+  chunks    Chunk[]
+
+  @@map("sources")
+}
+
+model Document {
+  id            String  @id
+  sourceId      String  @map("source_id")
+  uri           String
+  title         String?
+  contentHash   String? @map("content_hash")
+  extractedPath String? @map("extracted_path")
+  status        String  @default("pending")
+  error         String?
+  metaJson      String  @default("{}") @map("meta_json")
+  createdAt     String  @map("created_at")
+  updatedAt     String  @map("updated_at")
+  source        Source  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  chunks        Chunk[]
+
+  @@unique([sourceId, uri])
+  @@index([sourceId], map: "idx_documents_source")
+  @@map("documents")
+}
+
+model Chunk {
+  id           String           @id
+  documentId   String           @map("document_id")
+  sourceId     String           @map("source_id")
+  chunkIndex   Int              @map("chunk_index")
+  text         String
+  heading      String?
+  sectionPath  String?          @map("section_path")
+  startOffset  Int?             @map("start_offset")
+  endOffset    Int?             @map("end_offset")
+  contentHash  String           @map("content_hash")
+  metaJson     String           @default("{}") @map("meta_json")
+  createdAt    String           @map("created_at")
+  document     Document         @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  source       Source           @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  embedding    ChunkEmbedding?
+
+  @@index([documentId], map: "idx_chunks_document")
+  @@index([sourceId], map: "idx_chunks_source")
+  @@map("chunks")
+}
+
+model ChunkEmbedding {
+  chunkId   String @id @map("chunk_id")
+  modelId   String @map("model_id")
+  dims      Int
+  embedding Bytes
+  createdAt String @map("created_at")
+  chunk     Chunk  @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+
+  @@map("chunk_embeddings")
+}
+
+model IngestRun {
+  id           String  @id
+  sourceId     String  @map("source_id")
+  startedAt    String  @map("started_at")
+  finishedAt   String? @map("finished_at")
+  status       String
+  strategy     String?
+  pagesOk      Int     @default(0) @map("pages_ok")
+  pagesFailed  Int     @default(0) @map("pages_failed")
+  pagesSkipped Int     @default(0) @map("pages_skipped")
+  reportPath   String? @map("report_path")
+  metaJson     String  @default("{}") @map("meta_json")
+
+  @@map("ingest_runs")
+}
+
+model IngestError {
+  id        Int     @id @default(autoincrement())
+  runId     String  @map("run_id")
+  sourceId  String  @map("source_id")
+  uri       String?
+  error     String
+  createdAt String  @map("created_at")
+
+  @@map("ingest_errors")
+}

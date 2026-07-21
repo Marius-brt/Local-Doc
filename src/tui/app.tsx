@@ -46,6 +46,39 @@ function visitFromProgress(phase: string, message?: string): string | null {
   return null;
 }
 
+/** Bordered action control — height 3 leaves one content row inside the border. */
+function ActionButton(props: {
+  label: string;
+  fg: string;
+  borderColor: string;
+  backgroundColor?: string;
+  flexGrow?: number;
+  width?: number;
+  onMouseDown: () => void;
+  onMouseOver: () => void;
+  onMouseOut: () => void;
+}) {
+  return (
+    <box
+      height={3}
+      flexGrow={props.flexGrow}
+      width={props.width}
+      paddingLeft={1}
+      paddingRight={1}
+      border
+      borderColor={props.borderColor}
+      backgroundColor={props.backgroundColor}
+      justifyContent="center"
+      alignItems="center"
+      onMouseDown={props.onMouseDown}
+      onMouseOver={props.onMouseOver}
+      onMouseOut={props.onMouseOut}
+    >
+      <text fg={props.fg}>{props.label}</text>
+    </box>
+  );
+}
+
 function formatIngestLog(header: string, status: string, visited: string[]): string {
   const body = visited.length > 0 ? visited.map((u) => `  ${u}`).join("\n") : "";
   return [header, status, body].filter(Boolean).join("\n");
@@ -132,14 +165,19 @@ function App() {
 
   const cancelWork = useCallback(() => {
     queryGenRef.current += 1;
+    // Abort in-flight work; keep busy=true until the worker's finally clears it
+    // so Escape / Cancel stay responsive and the AbortController remains reachable.
     abortRef.current?.abort();
-    abortRef.current = null;
-    setSearching(false);
-    setAdding(false);
-    setUpdating(false);
-    setResult((r) => (searching ? "Cancelled." : r));
-    setAddLog((l) => (adding ? "Cancelled." : l));
-    setUpdateLog((l) => (updating ? "Cancelled." : l));
+    if (searching) {
+      setSearching(false);
+      setResult("Cancelled.");
+    }
+    if (adding) {
+      setAddLog((l) => (l.includes("Cancel") ? l : `${l}\nCancelling…`));
+    }
+    if (updating) {
+      setUpdateLog((l) => (l.includes("Cancel") ? l : `${l}\nCancelling…`));
+    }
     setFocus(view === "query" || view === "add" ? "input" : "main");
   }, [searching, adding, updating, view]);
 
@@ -315,16 +353,21 @@ function App() {
       setFocus("main");
       setView("sources");
       setUpdateLog(`Re-embedding ${label} (no re-fetch)…`);
+      let lastProgressAt = 0;
       try {
         const report = await reembedChunks(state.db, state.loaded.config, state.loaded.dataDir, {
           signal: ac.signal,
           sourceId,
           onProgress: (p) => {
             if (ac.signal.aborted) return;
+            const now = Date.now();
+            // Throttle UI updates so React/OpenTUI can still handle Escape / Cancel
+            if (p.phase === "embed" && now - lastProgressAt < 120) return;
+            lastProgressAt = now;
             setUpdateLog(
               p.current && p.total
-                ? `[${p.phase}] ${p.current}/${p.total} ${p.message ?? ""}`
-                : `[${p.phase}] ${p.message ?? ""}`,
+                ? `[${p.phase}] ${p.current}/${p.total} ${p.message ?? ""}\nEsc / Cancel to stop`
+                : `[${p.phase}] ${p.message ?? ""}\nEsc / Cancel to stop`,
             );
           },
         });
@@ -549,13 +592,18 @@ function App() {
             <box flexDirection="row" width="100%" height="100%" gap={1}>
               <box width="45%" height="100%" flexDirection="column" gap={1}>
                 <box flexDirection="row" width="100%" gap={1}>
-                  <box
+                  <ActionButton
                     flexGrow={1}
-                    paddingLeft={1}
-                    paddingRight={1}
-                    border
+                    label="U update all"
                     borderColor={hoveredNav === "update-all" ? COLORS.accent : COLORS.border}
                     backgroundColor={hoveredNav === "update-all" ? COLORS.border : COLORS.panel}
+                    fg={
+                      state.sources.length === 0 || busy
+                        ? COLORS.muted
+                        : hoveredNav === "update-all"
+                          ? COLORS.text
+                          : COLORS.accent
+                    }
                     onMouseDown={() => {
                       if (!busy && state.sources.length > 0) {
                         void runUpdate(
@@ -566,26 +614,19 @@ function App() {
                     }}
                     onMouseOver={() => setHoveredNav("update-all")}
                     onMouseOut={() => setHoveredNav((h) => (h === "update-all" ? null : h))}
-                  >
-                    <text
-                      fg={
-                        state.sources.length === 0 || busy
-                          ? COLORS.muted
-                          : hoveredNav === "update-all"
-                            ? COLORS.text
-                            : COLORS.accent
-                      }
-                    >
-                      U update all
-                    </text>
-                  </box>
-                  <box
+                  />
+                  <ActionButton
                     flexGrow={1}
-                    paddingLeft={1}
-                    paddingRight={1}
-                    border
+                    label="I re-embed all"
                     borderColor={hoveredNav === "reindex-all" ? COLORS.yellow : COLORS.border}
                     backgroundColor={hoveredNav === "reindex-all" ? COLORS.border : COLORS.panel}
+                    fg={
+                      state.sources.length === 0 || busy
+                        ? COLORS.muted
+                        : hoveredNav === "reindex-all"
+                          ? COLORS.text
+                          : COLORS.yellow
+                    }
                     onMouseDown={() => {
                       if (!busy && state.sources.length > 0) {
                         void runReembed(`all ${state.sources.length} sources`);
@@ -593,19 +634,7 @@ function App() {
                     }}
                     onMouseOver={() => setHoveredNav("reindex-all")}
                     onMouseOut={() => setHoveredNav((h) => (h === "reindex-all" ? null : h))}
-                  >
-                    <text
-                      fg={
-                        state.sources.length === 0 || busy
-                          ? COLORS.muted
-                          : hoveredNav === "reindex-all"
-                            ? COLORS.text
-                            : COLORS.yellow
-                      }
-                    >
-                      I re-embed all
-                    </text>
-                  </box>
+                  />
                 </box>
                 <scrollbox
                   width="100%"
@@ -670,12 +699,17 @@ function App() {
                 )}
 
                 <box flexDirection="row" gap={1} marginTop={1}>
-                  <box
-                    paddingLeft={1}
-                    paddingRight={1}
-                    border
+                  <ActionButton
+                    label="u update"
                     borderColor={hoveredNav === "update" ? COLORS.accent : COLORS.border}
                     backgroundColor={hoveredNav === "update" ? COLORS.border : undefined}
+                    fg={
+                      !selected || busy
+                        ? COLORS.muted
+                        : hoveredNav === "update"
+                          ? COLORS.text
+                          : COLORS.accent
+                    }
                     onMouseDown={() => {
                       if (!busy && selected) {
                         void runUpdate([selected.root_uri], selected.title || selected.root_uri);
@@ -683,56 +717,34 @@ function App() {
                     }}
                     onMouseOver={() => setHoveredNav("update")}
                     onMouseOut={() => setHoveredNav((h) => (h === "update" ? null : h))}
-                  >
-                    <text
-                      fg={
-                        !selected || busy
-                          ? COLORS.muted
-                          : hoveredNav === "update"
-                            ? COLORS.text
-                            : COLORS.accent
-                      }
-                    >
-                      u update
-                    </text>
-                  </box>
-                  <box
-                    paddingLeft={1}
-                    paddingRight={1}
-                    border
+                  />
+                  <ActionButton
+                    label="d remove"
                     borderColor={hoveredNav === "remove" ? COLORS.red : COLORS.border}
                     backgroundColor={hoveredNav === "remove" ? COLORS.border : undefined}
+                    fg={
+                      !selected || busy
+                        ? COLORS.muted
+                        : hoveredNav === "remove"
+                          ? COLORS.text
+                          : COLORS.red
+                    }
                     onMouseDown={() => {
                       if (!busy && selected) void runRemove(selected);
                     }}
                     onMouseOver={() => setHoveredNav("remove")}
                     onMouseOut={() => setHoveredNav((h) => (h === "remove" ? null : h))}
-                  >
-                    <text
-                      fg={
-                        !selected || busy
-                          ? COLORS.muted
-                          : hoveredNav === "remove"
-                            ? COLORS.text
-                            : COLORS.red
-                      }
-                    >
-                      d remove
-                    </text>
-                  </box>
+                  />
                   {updating && (
-                    <box
-                      paddingLeft={1}
-                      paddingRight={1}
-                      border
+                    <ActionButton
+                      label="Cancel"
                       borderColor={hoveredNav === "cancel" ? COLORS.red : COLORS.border}
                       backgroundColor={hoveredNav === "cancel" ? COLORS.border : undefined}
+                      fg={COLORS.red}
                       onMouseDown={() => cancelWork()}
                       onMouseOver={() => setHoveredNav("cancel")}
                       onMouseOut={() => setHoveredNav((h) => (h === "cancel" ? null : h))}
-                    >
-                      <text fg={COLORS.red}>Cancel</text>
-                    </box>
+                    />
                   )}
                 </box>
 
@@ -794,20 +806,16 @@ function App() {
                   />
                 </box>
                 {busy && (
-                  <box
+                  <ActionButton
                     width={12}
-                    height={3}
-                    border
+                    label="Cancel"
                     borderColor={hoveredNav === "cancel" ? COLORS.red : COLORS.border}
                     backgroundColor={hoveredNav === "cancel" ? COLORS.border : COLORS.panel}
-                    justifyContent="center"
-                    alignItems="center"
+                    fg={COLORS.red}
                     onMouseDown={() => cancelWork()}
                     onMouseOver={() => setHoveredNav("cancel")}
                     onMouseOut={() => setHoveredNav((h) => (h === "cancel" ? null : h))}
-                  >
-                    <text fg={COLORS.red}>Cancel</text>
-                  </box>
+                  />
                 )}
               </box>
               <scrollbox
@@ -899,20 +907,16 @@ function App() {
                   />
                 </box>
                 {busy && (
-                  <box
+                  <ActionButton
                     width={12}
-                    height={3}
-                    border
+                    label="Cancel"
                     borderColor={hoveredNav === "cancel" ? COLORS.red : COLORS.border}
                     backgroundColor={hoveredNav === "cancel" ? COLORS.border : COLORS.panel}
-                    justifyContent="center"
-                    alignItems="center"
+                    fg={COLORS.red}
                     onMouseDown={() => cancelWork()}
                     onMouseOver={() => setHoveredNav("cancel")}
                     onMouseOut={() => setHoveredNav((h) => (h === "cancel" ? null : h))}
-                  >
-                    <text fg={COLORS.red}>Cancel</text>
-                  </box>
+                  />
                 )}
               </box>
               <scrollbox

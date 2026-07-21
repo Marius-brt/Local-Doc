@@ -10,8 +10,8 @@ import { ensureOnnxNatives } from "./onnx-natives.ts";
 export interface Embedder {
   modelId: string;
   dims: number;
-  embed(texts: string[]): Promise<Float32Array[]>;
-  embedOne(text: string): Promise<Float32Array>;
+  embed(texts: string[], signal?: AbortSignal): Promise<Float32Array[]>;
+  embedOne(text: string, signal?: AbortSignal): Promise<Float32Array>;
 }
 
 type FeatureExtractor = (
@@ -38,37 +38,68 @@ interface SidecarResponse {
   error?: string;
 }
 
+function throwIfEmbedAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const err = new Error("Cancelled");
+    err.name = "AbortError";
+    throw err;
+  }
+}
+
 async function encodeWithModel2VecSidecar(
   bin: string,
   modelDir: string,
   texts: string[],
+  signal?: AbortSignal,
 ): Promise<{ dims: number; embeddings: Float32Array[] }> {
+  throwIfEmbedAborted(signal);
   const proc = Bun.spawn([bin, "--model", modelDir], {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
   });
-  proc.stdin.write(JSON.stringify({ texts }));
-  proc.stdin.end();
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  let parsed: SidecarResponse;
+  const onAbort = () => {
+    try {
+      proc.kill();
+    } catch {
+      // already exited
+    }
+  };
+  if (signal) {
+    if (signal.aborted) {
+      onAbort();
+      throwIfEmbedAborted(signal);
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
   try {
-    parsed = JSON.parse(stdout) as SidecarResponse;
-  } catch {
-    throw new Error(
-      `model2vec sidecar returned invalid JSON (exit ${exitCode}): ${stdout || stderr}`,
-    );
+    proc.stdin.write(JSON.stringify({ texts }));
+    proc.stdin.end();
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    throwIfEmbedAborted(signal);
+    let parsed: SidecarResponse;
+    try {
+      parsed = JSON.parse(stdout) as SidecarResponse;
+    } catch {
+      throwIfEmbedAborted(signal);
+      throw new Error(
+        `model2vec sidecar returned invalid JSON (exit ${exitCode}): ${stdout || stderr}`,
+      );
+    }
+    if (parsed.error || exitCode !== 0) {
+      throwIfEmbedAborted(signal);
+      throw new Error(parsed.error ?? (stderr || `model2vec sidecar exited ${exitCode}`));
+    }
+    const dims = parsed.dims ?? parsed.embeddings?.[0]?.length ?? 0;
+    const embeddings = (parsed.embeddings ?? []).map((row) => Float32Array.from(row));
+    return { dims, embeddings };
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
-  if (parsed.error || exitCode !== 0) {
-    throw new Error(parsed.error ?? (stderr || `model2vec sidecar exited ${exitCode}`));
-  }
-  const dims = parsed.dims ?? parsed.embeddings?.[0]?.length ?? 0;
-  const embeddings = (parsed.embeddings ?? []).map((row) => Float32Array.from(row));
-  return { dims, embeddings };
 }
 
 async function loadModel2VecSidecar(
@@ -102,7 +133,8 @@ function createModel2VecEmbedder(config: LocaldocConfig, dataDir: string): Embed
     get dims() {
       return dims;
     },
-    async embed(texts: string[]) {
+    async embed(texts: string[], signal?: AbortSignal) {
+      throwIfEmbedAborted(signal);
       const loaded = await loadModel2VecSidecar(configuredModel, dataDir);
       resolvedModel = loaded.modelId;
       dims = loaded.dims;
@@ -112,19 +144,21 @@ function createModel2VecEmbedder(config: LocaldocConfig, dataDir: string): Embed
       const out: Float32Array[] = [];
       const batchSize = Math.max(1, config.embeddings.batch_size ?? 20);
       for (let i = 0; i < texts.length; i += batchSize) {
+        throwIfEmbedAborted(signal);
         const batch = texts.slice(i, i + batchSize);
         const { embeddings, dims: d } = await encodeWithModel2VecSidecar(
           loaded.bin,
           loaded.modelDir,
           batch,
+          signal,
         );
         dims = d;
         out.push(...embeddings);
       }
       return out;
     },
-    async embedOne(text: string) {
-      const [v] = await this.embed([text]);
+    async embedOne(text: string, signal?: AbortSignal) {
+      const [v] = await this.embed([text], signal);
       return v!;
     },
   };
@@ -172,16 +206,19 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
     get dims() {
       return dims;
     },
-    async embed(texts: string[]) {
+    async embed(texts: string[], signal?: AbortSignal) {
+      throwIfEmbedAborted(signal);
       if (texts.length === 0) return [];
       const out: Float32Array[] = [];
       const batchSize = Math.max(1, config.embeddings.batch_size ?? 20);
       for (let i = 0; i < texts.length; i += batchSize) {
+        throwIfEmbedAborted(signal);
         const batch = texts.slice(i, i + batchSize);
         if (batch.length === 1) {
           const { embedding } = await aiEmbed({
             model,
             value: batch[0]!,
+            abortSignal: signal,
           });
           dims = embedding.length;
           out.push(Float32Array.from(embedding));
@@ -189,6 +226,7 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
           const { embeddings } = await embedMany({
             model,
             values: batch,
+            abortSignal: signal,
           });
           for (const embedding of embeddings) {
             dims = embedding.length;
@@ -198,8 +236,8 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
       }
       return out;
     },
-    async embedOne(text: string) {
-      const [v] = await this.embed([text]);
+    async embedOne(text: string, signal?: AbortSignal) {
+      const [v] = await this.embed([text], signal);
       return v!;
     },
   };

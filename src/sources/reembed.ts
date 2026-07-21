@@ -38,6 +38,11 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
+/** Let the TUI process keyboard / mouse (Escape, Cancel) between heavy work. */
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 /** Recompute embeddings for existing chunks — no crawl / re-fetch. */
 export async function reembedChunks(
   db: Client,
@@ -50,12 +55,14 @@ export async function reembedChunks(
   const batchSize = Math.max(1, options.batchSize ?? config.embeddings.batch_size ?? 20);
 
   progress({ phase: "embedder", message: "Loading embedding model…" });
+  await yieldToUi();
   const embedder = await tryCreateEmbedder(config, dataDir);
   if (!embedder) {
     throw new Error("No embedder available — check embeddings config");
   }
 
   throwIfAborted(options.signal);
+  await yieldToUi();
 
   const res = options.sourceId
     ? await db.execute({
@@ -83,8 +90,10 @@ export async function reembedChunks(
 
   // Probe the live model so we know the new dimensionality before touching the index.
   progress({ phase: "probe", message: "Probing embedding dimensions…" });
+  await yieldToUi();
+  throwIfAborted(options.signal);
   const probeText = chunks.find((c) => c.text.trim())?.text || "dimension probe";
-  const [probeVec] = await embedder.embed([probeText.slice(0, 2000)]);
+  const [probeVec] = await embedder.embed([probeText.slice(0, 2000)], options.signal);
   const dims = probeVec?.length ?? 0;
   if (dims <= 0) {
     throw new Error("Embedder returned an empty vector — cannot rebuild vector index");
@@ -92,6 +101,7 @@ export async function reembedChunks(
 
   const previousDims = await getVectorDims(db);
   throwIfAborted(options.signal);
+  await yieldToUi();
 
   // libSQL stores dims in the column type + vector index — rebuild before inserts.
   progress({
@@ -102,6 +112,7 @@ export async function reembedChunks(
         ? `Rebuilding vector index ${previousDims}-d → ${dims}-d`
         : `Preparing vector index (${dims}-d)`,
   });
+  await yieldToUi();
 
   if (options.sourceId && previousDims != null && previousDims === dims) {
     // Same dimensionality: only replace this source's vectors.
@@ -118,6 +129,8 @@ export async function reembedChunks(
 
   for (let i = 0; i < chunks.length; i += batchSize) {
     throwIfAborted(options.signal);
+    await yieldToUi();
+
     const batch = chunks.slice(i, i + batchSize);
     progress({
       phase: "embed",
@@ -126,8 +139,14 @@ export async function reembedChunks(
       message: `${embedder.modelId} · ${dims}-d`,
     });
 
-    const vectors = await embedder.embed(batch.map((c) => c.text));
+    const vectors = await embedder.embed(
+      batch.map((c) => c.text),
+      options.signal,
+    );
+    throwIfAborted(options.signal);
+
     for (let j = 0; j < batch.length; j++) {
+      throwIfAborted(options.signal);
       const vec = vectors[j];
       if (!vec) continue;
       if (vec.length !== dims) {
@@ -137,6 +156,11 @@ export async function reembedChunks(
       }
       await insertEmbedding(db, batch[j]!.id, embedder.modelId, vec);
       embedded++;
+      // Periodic yield during large write bursts
+      if (j > 0 && j % 5 === 0) {
+        await yieldToUi();
+        throwIfAborted(options.signal);
+      }
     }
   }
 

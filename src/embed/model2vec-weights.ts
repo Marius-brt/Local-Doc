@@ -41,10 +41,7 @@ function assertAllowedDownloadUrl(url: string): void {
     throw new Error(`Refusing non-HTTPS model download: ${url}`);
   }
   const host = parsed.hostname.toLowerCase();
-  const allowed =
-    HF_HOSTS.has(host) ||
-    host.endsWith(".huggingface.co") ||
-    host.endsWith(".hf.co");
+  const allowed = HF_HOSTS.has(host) || host.endsWith(".huggingface.co") || host.endsWith(".hf.co");
   if (!allowed) {
     throw new Error(`Refusing model download from unexpected host: ${host}`);
   }

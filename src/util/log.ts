@@ -24,10 +24,7 @@ export function redactSecrets(text: string): string {
       /\b(api[_-]?key|token|secret|password)\b([=:]\s*)(["']?)([^\s"'\\]{6,})\3/gi,
       "$1$2$3***$3",
     )
-    .replace(
-      /\b(sk-[A-Za-z0-9]{10,}|sk-proj-[A-Za-z0-9_-]{10,}|co_[A-Za-z0-9]{10,})\b/g,
-      "***",
-    );
+    .replace(/\b(sk-[A-Za-z0-9]{10,}|sk-proj-[A-Za-z0-9_-]{10,}|co_[A-Za-z0-9]{10,})\b/g, "***");
 }
 
 function formatLine(level: LogLevel, message: string): string {

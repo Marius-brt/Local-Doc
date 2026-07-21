@@ -106,7 +106,10 @@ describe("url helpers", () => {
     expect(isUnderRoot("https://ex.com/docs/a", "https://ex.com/docs")).toBe(true);
     expect(isUnderRoot("https://ex.com/blog", "https://ex.com/docs")).toBe(false);
     expect(
-      urlInFetchScope("https://ex.com/sitemap.xml", { mode: "same-origin", root: "https://ex.com/docs" }),
+      urlInFetchScope("https://ex.com/sitemap.xml", {
+        mode: "same-origin",
+        root: "https://ex.com/docs",
+      }),
     ).toBe(true);
     expect(
       urlInFetchScope("https://evil.com/x", { mode: "same-origin", root: "https://ex.com/docs" }),

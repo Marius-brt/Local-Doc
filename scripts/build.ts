@@ -7,7 +7,7 @@
  * - Embeds libsql native (rewrites dynamic require)
  * - Stubs Playwright (downloaded on demand under Bun)
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BunPlugin } from "bun";
 
@@ -192,6 +192,10 @@ async function buildModel2VecSidecar(): Promise<string> {
   const bin = join(targetDir, "release", binName);
   if (!(await Bun.file(bin).exists())) {
     throw new Error(`expected sidecar at ${bin}`);
+  }
+  // embed-model2vec.ts imports a stable extensionless path; cargo emits *.exe on Windows.
+  if (process.platform === "win32") {
+    await copyFile(bin, join(targetDir, "release", "localdoc-model2vec"));
   }
   return bin;
 }

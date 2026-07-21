@@ -41,7 +41,10 @@ detect_asset() {
 
   case "$os" in
     darwin)
-      printf 'localdoc-darwin-%s\n' "$arch"
+      if [ "$arch" != "arm64" ]; then
+        die "no published darwin/${arch} build (available: darwin-arm64); build from source on Intel Macs"
+      fi
+      printf 'localdoc-darwin-arm64\n'
       ;;
     linux)
       libc="gnu"

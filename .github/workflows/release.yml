@@ -18,9 +18,6 @@ jobs:
           - os: macos-14
             target: bun-darwin-arm64
             artifact: localdoc-darwin-arm64
-          - os: macos-13
-            target: bun-darwin-x64
-            artifact: localdoc-darwin-x64
           - os: ubuntu-latest
             target: bun-linux-x64
             artifact: localdoc-linux-x64

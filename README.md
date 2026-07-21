@@ -41,7 +41,7 @@ PREFIX=/usr/local/bin bash install.sh
 LOCALDOC_LIBC=musl bash install.sh
 ```
 
-Published assets: `localdoc-darwin-arm64`, `localdoc-darwin-x64`, `localdoc-linux-x64`, `localdoc-linux-x64-musl`, `localdoc-windows-x64.exe`.
+Published assets: `localdoc-darwin-arm64`, `localdoc-linux-x64`, `localdoc-linux-x64-musl`, `localdoc-windows-x64.exe`.
 
 On Windows, download `localdoc-windows-x64.exe` from [Releases](https://github.com/Marius-brt/Local-Doc/releases) and put it on your `PATH`.
 
@@ -153,7 +153,7 @@ bun run build                 # all targets
 bun run scripts/build.ts linux  # filter by name
 ```
 
-Artifacts land in `dist/`. GitHub Actions (`.github/workflows/release.yml`) builds on version tags for macOS (arm64/x64), Linux (glibc + musl), and Windows.
+Artifacts land in `dist/`. GitHub Actions (`.github/workflows/release.yml`) builds on version tags for macOS (arm64), Linux (glibc + musl), and Windows.
 
 **Notes on the standalone binary:**
 

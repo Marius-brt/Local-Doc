@@ -34,6 +34,19 @@ export interface IngestOptions {
   recreate?: boolean;
   strategy?: DiscoveryStrategy;
   onProgress?: (p: IngestProgress) => void;
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const err = new Error("Cancelled");
+    err.name = "AbortError";
+    throw err;
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && (err.name === "AbortError" || err.message === "Cancelled");
 }
 
 export interface IngestReport {
@@ -117,6 +130,7 @@ async function fetchPageContent(
   config: LocaldocConfig,
   dataDir: string,
   onBrowserProgress?: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<{
   ok: boolean;
   finalUrl: string;
@@ -124,6 +138,7 @@ async function fetchPageContent(
   usedPlaywright: boolean;
   error?: string;
 }> {
+  throwIfAborted(signal);
   const mode = config.crawl.playwright;
   const browserProgress = onBrowserProgress
     ? (message: string) => onBrowserProgress(message)
@@ -141,7 +156,7 @@ async function fetchPageContent(
     };
   }
 
-  const res = await fetchText(url, config);
+  const res = await fetchText(url, config, signal);
   let html = res.body;
   let ok = res.ok;
   let finalUrl = res.url;
@@ -163,7 +178,8 @@ async function fetchPageContent(
         }
       })());
 
-  if (needsBrowser && mode !== "never") {
+  if (needsBrowser) {
+    throwIfAborted(signal);
     const { fetchWithPlaywright } = await import("../playwright/browser.ts");
     const pw = await fetchWithPlaywright(url, config, dataDir, browserProgress);
     if (pw.ok && pw.body) {
@@ -199,7 +215,8 @@ export async function ingestWeb(
   });
 
   progress({ phase: "discover", message: "Discovering URLs…" });
-  const discovery = await discoverUrls(rootUrl, config, options.strategy);
+  const discovery = await discoverUrls(rootUrl, config, options.strategy, options.signal);
+  throwIfAborted(options.signal);
   await upsertSource(db, {
     kind: "web",
     rootUri: rootUrl,
@@ -219,73 +236,92 @@ export async function ingestWeb(
     message: `Fetching ${discovery.urls.length} pages via ${discovery.strategy}`,
   });
 
-  await Promise.all(
-    discovery.urls.map((url, idx) =>
-      limit(async () => {
-        progress({
-          phase: "fetch",
-          current: idx + 1,
-          total: discovery.urls.length,
-          message: url,
-        });
-        try {
-          // Special-case llms-full.txt as markdown
-          if (url.endsWith("llms-full.txt") || url.endsWith("llms.txt")) {
-            const res = await fetchText(url, config);
-            if (!res.ok) throw new Error(res.error ?? "fetch failed");
+  try {
+    await Promise.all(
+      discovery.urls.map((url, idx) =>
+        limit(async () => {
+          throwIfAborted(options.signal);
+          progress({
+            phase: "fetch",
+            current: idx + 1,
+            total: discovery.urls.length,
+            message: url,
+          });
+          try {
+            // Special-case llms-full.txt as markdown
+            if (url.endsWith("llms-full.txt") || url.endsWith("llms.txt")) {
+              const res = await fetchText(url, config, options.signal);
+              if (!res.ok) throw new Error(res.error ?? "fetch failed");
+              const result = await indexMarkdownDoc({
+                db,
+                config,
+                dataDir,
+                sourceId: source.id,
+                uri: res.url,
+                title: url.split("/").pop() ?? url,
+                markdown: res.body,
+                recreate: Boolean(options.recreate),
+                embedder,
+              });
+              if (result === "skipped") pagesSkipped++;
+              else pagesOk++;
+              return;
+            }
+
+            const fetched = await fetchPageContent(
+              url,
+              config,
+              dataDir,
+              (message) => progress({ phase: "browser", message }),
+              options.signal,
+            );
+            if (!fetched.ok || !fetched.html) {
+              throw new Error(fetched.error ?? "empty response");
+            }
+            const extracted = extractPage(fetched.html, fetched.finalUrl);
+            if (isBoilerplateOnly(extracted.markdown)) {
+              throw new Error("boilerplate-only content");
+            }
             const result = await indexMarkdownDoc({
               db,
               config,
               dataDir,
               sourceId: source.id,
-              uri: res.url,
-              title: url.split("/").pop() ?? url,
-              markdown: res.body,
+              uri: fetched.finalUrl,
+              title: extracted.title,
+              markdown: extracted.markdown,
               recreate: Boolean(options.recreate),
               embedder,
             });
             if (result === "skipped") pagesSkipped++;
             else pagesOk++;
-            return;
+          } catch (err) {
+            if (isAbortError(err)) throw err;
+            pagesFailed++;
+            const message = err instanceof Error ? err.message : String(err);
+            errors.push({ uri: url, error: message });
+            await upsertDocument(db, {
+              sourceId: source.id,
+              uri: url,
+              status: "error",
+              error: message,
+            });
           }
-
-          const fetched = await fetchPageContent(url, config, dataDir, (message) =>
-            progress({ phase: "browser", message }),
-          );
-          if (!fetched.ok || !fetched.html) {
-            throw new Error(fetched.error ?? "empty response");
-          }
-          const extracted = extractPage(fetched.html, fetched.finalUrl);
-          if (isBoilerplateOnly(extracted.markdown)) {
-            throw new Error("boilerplate-only content");
-          }
-          const result = await indexMarkdownDoc({
-            db,
-            config,
-            dataDir,
-            sourceId: source.id,
-            uri: fetched.finalUrl,
-            title: extracted.title,
-            markdown: extracted.markdown,
-            recreate: Boolean(options.recreate),
-            embedder,
-          });
-          if (result === "skipped") pagesSkipped++;
-          else pagesOk++;
-        } catch (err) {
-          pagesFailed++;
-          const message = err instanceof Error ? err.message : String(err);
-          errors.push({ uri: url, error: message });
-          await upsertDocument(db, {
-            sourceId: source.id,
-            uri: url,
-            status: "error",
-            error: message,
-          });
-        }
-      }),
-    ),
-  );
+        }),
+      ),
+    );
+  } catch (err) {
+    if (isAbortError(err)) {
+      await upsertSource(db, {
+        kind: "web",
+        rootUri: rootUrl,
+        strategy: discovery.strategy,
+        status: "error",
+      });
+      throw err;
+    }
+    throw err;
+  }
 
   await upsertSource(db, {
     kind: "web",
@@ -343,6 +379,7 @@ export async function ingestFolder(
   await Promise.all(
     files.map((file, idx) =>
       limit(async () => {
+        throwIfAborted(options.signal);
         progress({
           phase: "index",
           current: idx + 1,
@@ -368,6 +405,7 @@ export async function ingestFolder(
           if (result === "skipped") pagesSkipped++;
           else pagesOk++;
         } catch (err) {
+          if (isAbortError(err)) throw err;
           pagesFailed++;
           errors.push({
             uri: file.uri,
@@ -414,10 +452,14 @@ export async function ingestGithub(
   progress({ phase: "clone", message: "Fetching GitHub repository…" });
   let collected: Awaited<ReturnType<typeof collectGithubFiles>>;
   try {
+    throwIfAborted(options.signal);
     collected = await collectGithubFiles(input);
-  } catch {
-    collected = await collectGithubViaApi(input);
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    collected = await collectGithubViaApi(input, config, options.signal);
   }
+
+  throwIfAborted(options.signal);
 
   const source = await upsertSource(db, {
     kind: "github",
@@ -436,6 +478,7 @@ export async function ingestGithub(
   await Promise.all(
     collected.files.map((file, idx) =>
       limit(async () => {
+        throwIfAborted(options.signal);
         progress({
           phase: "index",
           current: idx + 1,
@@ -457,6 +500,7 @@ export async function ingestGithub(
           if (result === "skipped") pagesSkipped++;
           else pagesOk++;
         } catch (err) {
+          if (isAbortError(err)) throw err;
           pagesFailed++;
           errors.push({
             uri: file.uri,

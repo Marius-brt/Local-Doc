@@ -67,7 +67,6 @@ export const ConfigSchema = z.object({
       timeout_ms: z.number().int().positive().default(30_000),
       playwright: z.enum(["auto", "always", "never"]).default("auto"),
       respect_robots: z.boolean().default(true),
-      proxy: z.string().nullable().default(null),
       headers: z.record(z.string(), z.string()).default({}),
     })
     .default({
@@ -76,19 +75,22 @@ export const ConfigSchema = z.object({
       timeout_ms: 30_000,
       playwright: "auto",
       respect_robots: true,
-      proxy: null,
       headers: {},
     }),
   http: z
     .object({
+      /** HTTP(S) proxy URL used for both http:// and https:// requests (Bun fetch + Playwright). */
       proxy: z.string().nullable().default(null),
       headers: z.record(z.string(), z.string()).default({}),
       retries: z.number().int().nonnegative().default(3),
+      /** When false, skip TLS certificate verification (self-signed / corporate MITM proxies). */
+      reject_unauthorized: z.boolean().default(true),
     })
     .default({
       proxy: null,
       headers: {},
       retries: 3,
+      reject_unauthorized: true,
     }),
 });
 

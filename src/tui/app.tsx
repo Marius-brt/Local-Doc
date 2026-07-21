@@ -1,7 +1,7 @@
 import type { Client } from "@libsql/client";
 import { createCliRenderer } from "@opentui/core";
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type LoadedConfig, loadConfig } from "../config/load.ts";
 import { getDb } from "../db/client.ts";
 import { countStats } from "../db/documents.ts";
@@ -19,6 +19,14 @@ const VIEWS: Array<{ id: View; label: string; key: string }> = [
   { id: "inspect", label: "Inspect", key: "3" },
   { id: "add", label: "Add", key: "4" },
 ];
+
+function throwIfBusyAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    const err = new Error("Cancelled");
+    err.name = "AbortError";
+    throw err;
+  }
+}
 
 const COLORS = {
   bg: "#0d1117",
@@ -60,7 +68,16 @@ function App() {
   const [addTarget, setAddTarget] = useState("");
   const [addLog, setAddLog] = useState("");
   const [adding, setAdding] = useState(false);
+  const [updateLog, setUpdateLog] = useState("");
+  const [updating, setUpdating] = useState(false);
   const [focus, setFocus] = useState<"nav" | "main" | "input">("main");
+  const [hoveredNav, setHoveredNav] = useState<
+    View | "refresh" | "quit" | "cancel" | "update" | "update-all" | null
+  >(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const queryGenRef = useRef(0);
+
+  const busy = searching || adding || updating;
 
   const refresh = useCallback(async () => {
     try {
@@ -90,30 +107,53 @@ function App() {
     void refresh();
   }, [refresh]);
 
+  const cancelWork = useCallback(() => {
+    queryGenRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setSearching(false);
+    setAdding(false);
+    setUpdating(false);
+    setResult((r) => (searching ? "Cancelled." : r));
+    setAddLog((l) => (adding ? "Cancelled." : l));
+    setUpdateLog((l) => (updating ? "Cancelled." : l));
+    setFocus(view === "query" || view === "add" ? "input" : "main");
+  }, [searching, adding, updating, view]);
+
   const runQuery = useCallback(
     async (q: string) => {
-      if (!q.trim() || !state.loaded || !state.db) return;
+      if (!q.trim() || !state.loaded || !state.db || busy) return;
+      const gen = ++queryGenRef.current;
       setSearching(true);
+      setFocus("main");
       setResult("Searching…");
       try {
         const embedder = await tryCreateEmbedder(state.loaded.config, state.loaded.dataDir);
+        if (gen !== queryGenRef.current) return;
         const hits = await hybridSearch(state.db, q, state.loaded.config, embedder);
+        if (gen !== queryGenRef.current) return;
         const pack = buildContextPack(q, hits, state.loaded.config.search.budget_tokens);
         setResult(formatPackMarkdown(pack));
-        setFocus("main");
       } catch (err) {
+        if (gen !== queryGenRef.current) return;
         setResult(err instanceof Error ? err.message : String(err));
       } finally {
-        setSearching(false);
+        if (gen === queryGenRef.current) {
+          setSearching(false);
+        }
       }
     },
-    [state.loaded, state.db],
+    [state.loaded, state.db, busy],
   );
 
   const runAdd = useCallback(
     async (target: string) => {
-      if (!target.trim() || !state.loaded || !state.db) return;
+      if (!target.trim() || !state.loaded || !state.db || busy) return;
+      abortRef.current?.abort();
+      const ac = new AbortController();
+      abortRef.current = ac;
       setAdding(true);
+      setFocus("main");
       setAddLog(`Indexing ${target}…`);
       try {
         const report = await ingestTarget(
@@ -122,7 +162,9 @@ function App() {
           state.loaded.dataDir,
           target,
           {
+            signal: ac.signal,
             onProgress: (p) => {
+              if (ac.signal.aborted) return;
               setAddLog(
                 p.current && p.total
                   ? `[${p.phase}] ${p.current}/${p.total} ${p.message ?? ""}`
@@ -131,31 +173,104 @@ function App() {
             },
           },
         );
+        if (ac.signal.aborted) {
+          setAddLog("Cancelled.");
+          return;
+        }
         setAddLog(
           `Done: ${report.pagesOk} ok, ${report.pagesSkipped} skipped, ${report.pagesFailed} failed` +
             (report.strategy ? ` (${report.strategy})` : ""),
         );
         await refresh();
       } catch (err) {
+        if (ac.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+          setAddLog("Cancelled.");
+          return;
+        }
         setAddLog(err instanceof Error ? err.message : String(err));
       } finally {
+        if (abortRef.current === ac) abortRef.current = null;
         setAdding(false);
+        setFocus("input");
       }
     },
-    [state.loaded, state.db, refresh],
+    [state.loaded, state.db, refresh, busy],
+  );
+
+  const runUpdate = useCallback(
+    async (targets: string[], label: string) => {
+      if (targets.length === 0 || !state.loaded || !state.db || busy) return;
+      abortRef.current?.abort();
+      const ac = new AbortController();
+      abortRef.current = ac;
+      setUpdating(true);
+      setFocus("main");
+      setView("sources");
+      const lines: string[] = [];
+      const push = (line: string) => {
+        lines.push(line);
+        setUpdateLog(lines.join("\n"));
+      };
+      push(`Updating ${label}…`);
+      try {
+        for (let i = 0; i < targets.length; i++) {
+          throwIfBusyAborted(ac.signal);
+          const target = targets[i]!;
+          push(`[${i + 1}/${targets.length}] ${target}`);
+          const report = await ingestTarget(
+            state.db,
+            state.loaded.config,
+            state.loaded.dataDir,
+            target,
+            {
+              recreate: false,
+              signal: ac.signal,
+              onProgress: (p) => {
+                if (ac.signal.aborted) return;
+                const msg =
+                  p.current && p.total
+                    ? `[${p.phase}] ${p.current}/${p.total} ${p.message ?? ""}`
+                    : `[${p.phase}] ${p.message ?? ""}`;
+                setUpdateLog([...lines, msg].join("\n"));
+              },
+            },
+          );
+          throwIfBusyAborted(ac.signal);
+          push(
+            `  → ${report.pagesOk} ok, ${report.pagesSkipped} skipped, ${report.pagesFailed} failed` +
+              (report.strategy ? ` (${report.strategy})` : ""),
+          );
+        }
+        push("Done.");
+        await refresh();
+      } catch (err) {
+        if (ac.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+          push("Cancelled.");
+          return;
+        }
+        push(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (abortRef.current === ac) abortRef.current = null;
+        setUpdating(false);
+      }
+    },
+    [state.loaded, state.db, refresh, busy],
   );
 
   const quit = useCallback(() => {
+    abortRef.current?.abort();
     renderer.destroy();
     process.exit(0);
   }, [renderer]);
 
-  const goToView = useCallback((next: View) => {
-    setView(next);
-    setFocus(next === "query" || next === "add" ? "input" : "main");
-  }, []);
-
-  const [hoveredNav, setHoveredNav] = useState<View | "refresh" | "quit" | null>(null);
+  const goToView = useCallback(
+    (next: View) => {
+      if (busy) return;
+      setView(next);
+      setFocus(next === "query" || next === "add" ? "input" : "main");
+    },
+    [busy],
+  );
 
   useKeyboard((key) => {
     if (key.ctrl && key.name === "c") {
@@ -163,9 +278,15 @@ function App() {
       return;
     }
     if (key.name === "escape") {
+      if (busy) {
+        cancelWork();
+        return;
+      }
       setFocus("main");
       return;
     }
+
+    if (busy) return;
 
     if (key.name === "1") {
       goToView("sources");
@@ -199,10 +320,23 @@ function App() {
       if (key.name === "down" || key.name === "j") {
         setSourceCursor((c) => Math.min(Math.max(state.sources.length - 1, 0), c + 1));
       }
+      if (key.name === "u" && !key.shift) {
+        const src = state.sources[sourceCursor];
+        if (src) void runUpdate([src.root_uri], src.title || src.root_uri);
+      }
+      if ((key.name === "u" && key.shift) || key.name === "U") {
+        if (state.sources.length > 0) {
+          void runUpdate(
+            state.sources.map((s) => s.root_uri),
+            `all ${state.sources.length} sources`,
+          );
+        }
+      }
     }
   });
 
   const selected = state.sources[sourceCursor] ?? null;
+  const inputFocused = focus === "input" && !busy;
 
   return (
     <box width="100%" height="100%" flexDirection="column" backgroundColor={COLORS.bg}>
@@ -261,7 +395,9 @@ function App() {
             width="100%"
             paddingLeft={1}
             backgroundColor={hoveredNav === "refresh" ? COLORS.border : undefined}
-            onMouseDown={() => void refresh()}
+            onMouseDown={() => {
+              if (!busy) void refresh();
+            }}
             onMouseOver={() => setHoveredNav("refresh")}
             onMouseOut={() => setHoveredNav((h) => (h === "refresh" ? null : h))}
           >
@@ -337,6 +473,7 @@ function App() {
                 flexDirection="column"
                 title="Detail"
                 titleColor={COLORS.muted}
+                gap={1}
               >
                 {selected ? (
                   <box flexDirection="column" gap={0}>
@@ -351,26 +488,150 @@ function App() {
                 ) : (
                   <text fg={COLORS.muted}>Select a source (j/k or ↑/↓)</text>
                 )}
+
+                <box flexDirection="row" gap={1} marginTop={1}>
+                  <box
+                    paddingLeft={1}
+                    paddingRight={1}
+                    border
+                    borderColor={hoveredNav === "update" ? COLORS.accent : COLORS.border}
+                    backgroundColor={hoveredNav === "update" ? COLORS.border : undefined}
+                    onMouseDown={() => {
+                      if (!busy && selected) {
+                        void runUpdate([selected.root_uri], selected.title || selected.root_uri);
+                      }
+                    }}
+                    onMouseOver={() => setHoveredNav("update")}
+                    onMouseOut={() => setHoveredNav((h) => (h === "update" ? null : h))}
+                  >
+                    <text
+                      fg={
+                        !selected || busy
+                          ? COLORS.muted
+                          : hoveredNav === "update"
+                            ? COLORS.text
+                            : COLORS.accent
+                      }
+                    >
+                      u update
+                    </text>
+                  </box>
+                  <box
+                    paddingLeft={1}
+                    paddingRight={1}
+                    border
+                    borderColor={hoveredNav === "update-all" ? COLORS.accent : COLORS.border}
+                    backgroundColor={hoveredNav === "update-all" ? COLORS.border : undefined}
+                    onMouseDown={() => {
+                      if (!busy && state.sources.length > 0) {
+                        void runUpdate(
+                          state.sources.map((s) => s.root_uri),
+                          `all ${state.sources.length} sources`,
+                        );
+                      }
+                    }}
+                    onMouseOver={() => setHoveredNav("update-all")}
+                    onMouseOut={() => setHoveredNav((h) => (h === "update-all" ? null : h))}
+                  >
+                    <text
+                      fg={
+                        state.sources.length === 0 || busy
+                          ? COLORS.muted
+                          : hoveredNav === "update-all"
+                            ? COLORS.text
+                            : COLORS.accent
+                      }
+                    >
+                      U update all
+                    </text>
+                  </box>
+                  {updating && (
+                    <box
+                      paddingLeft={1}
+                      paddingRight={1}
+                      border
+                      borderColor={hoveredNav === "cancel" ? COLORS.red : COLORS.border}
+                      backgroundColor={hoveredNav === "cancel" ? COLORS.border : undefined}
+                      onMouseDown={() => cancelWork()}
+                      onMouseOver={() => setHoveredNav("cancel")}
+                      onMouseOut={() => setHoveredNav((h) => (h === "cancel" ? null : h))}
+                    >
+                      <text fg={COLORS.red}>Cancel</text>
+                    </box>
+                  )}
+                </box>
+
+                {(updating || updateLog) && (
+                  <scrollbox
+                    width="100%"
+                    flexGrow={1}
+                    style={{
+                      rootOptions: { backgroundColor: COLORS.panel },
+                    }}
+                  >
+                    {(updateLog || "Working…").split("\n").map((line, i) => (
+                      <text
+                        key={`upd-${String(i)}-${line.slice(0, 12)}`}
+                        fg={
+                          updating
+                            ? COLORS.yellow
+                            : line.startsWith("Done")
+                              ? COLORS.green
+                              : COLORS.text
+                        }
+                      >
+                        {line || " "}
+                      </text>
+                    ))}
+                  </scrollbox>
+                )}
+
+                {!updating && !updateLog && (
+                  <text fg={COLORS.muted}>u update selected · U update all</text>
+                )}
               </box>
             </box>
           )}
 
           {view === "query" && (
             <box flexDirection="column" width="100%" height="100%" gap={1}>
-              <box
-                width="100%"
-                height={3}
-                border
-                borderColor={focus === "input" ? COLORS.accent : COLORS.border}
-                title="Query"
-                titleColor={COLORS.accent}
-              >
-                <input
-                  placeholder="Search indexed docs…"
-                  focused={focus === "input"}
-                  onInput={setQuery}
-                  onSubmit={(v: string) => void runQuery(v)}
-                />
+              <box width="100%" flexDirection="row" gap={1} height={3}>
+                <box
+                  flexGrow={1}
+                  height={3}
+                  border
+                  borderColor={inputFocused ? COLORS.accent : COLORS.border}
+                  title={busy ? "Query (busy)" : "Query"}
+                  titleColor={busy ? COLORS.muted : COLORS.accent}
+                >
+                  <input
+                    placeholder="Search indexed docs…"
+                    focused={inputFocused}
+                    value={query}
+                    onInput={(v: string) => {
+                      if (!busy) setQuery(v);
+                    }}
+                    onSubmit={() => {
+                      if (!busy) void runQuery(query);
+                    }}
+                  />
+                </box>
+                {busy && (
+                  <box
+                    width={12}
+                    height={3}
+                    border
+                    borderColor={hoveredNav === "cancel" ? COLORS.red : COLORS.border}
+                    backgroundColor={hoveredNav === "cancel" ? COLORS.border : COLORS.panel}
+                    justifyContent="center"
+                    alignItems="center"
+                    onMouseDown={() => cancelWork()}
+                    onMouseOver={() => setHoveredNav("cancel")}
+                    onMouseOut={() => setHoveredNav((h) => (h === "cancel" ? null : h))}
+                  >
+                    <text fg={COLORS.red}>Cancel</text>
+                  </box>
+                )}
               </box>
               <scrollbox
                 width="100%"
@@ -387,7 +648,7 @@ function App() {
                 }}
               >
                 {searching ? (
-                  <text fg={COLORS.yellow}>Searching…</text>
+                  <text fg={COLORS.yellow}>Searching… (Esc / Cancel to stop)</text>
                 ) : result ? (
                   result.split("\n").map((line, i) => (
                     <text key={`line-${String(i)}-${line.slice(0, 8)}`} fg={COLORS.text}>
@@ -417,6 +678,10 @@ function App() {
                   ? state.loaded.config.rerank.provider
                   : "disabled"}
               </text>
+              <text fg={COLORS.muted}>proxy: {state.loaded?.config.http.proxy ?? "none"}</text>
+              <text fg={COLORS.muted}>
+                tls verify: {state.loaded?.config.http.reject_unauthorized === false ? "off" : "on"}
+              </text>
               <text fg={COLORS.muted}>
                 playwright: {state.loaded?.config.crawl.playwright ?? "—"}
               </text>
@@ -428,20 +693,43 @@ function App() {
 
           {view === "add" && (
             <box flexDirection="column" width="100%" height="100%" gap={1}>
-              <box
-                width="100%"
-                height={3}
-                border
-                borderColor={focus === "input" ? COLORS.accent : COLORS.border}
-                title="URL · GitHub · folder"
-                titleColor={COLORS.accent}
-              >
-                <input
-                  placeholder="https://docs…  |  github.com/org/repo  |  ./docs"
-                  focused={focus === "input"}
-                  onInput={setAddTarget}
-                  onSubmit={(v: string) => void runAdd(v)}
-                />
+              <box width="100%" flexDirection="row" gap={1} height={3}>
+                <box
+                  flexGrow={1}
+                  height={3}
+                  border
+                  borderColor={inputFocused ? COLORS.accent : COLORS.border}
+                  title={busy ? "Add (busy)" : "URL · GitHub · folder"}
+                  titleColor={busy ? COLORS.muted : COLORS.accent}
+                >
+                  <input
+                    placeholder="https://docs…  |  github.com/org/repo  |  ./docs"
+                    focused={inputFocused}
+                    value={addTarget}
+                    onInput={(v: string) => {
+                      if (!busy) setAddTarget(v);
+                    }}
+                    onSubmit={() => {
+                      if (!busy) void runAdd(addTarget);
+                    }}
+                  />
+                </box>
+                {busy && (
+                  <box
+                    width={12}
+                    height={3}
+                    border
+                    borderColor={hoveredNav === "cancel" ? COLORS.red : COLORS.border}
+                    backgroundColor={hoveredNav === "cancel" ? COLORS.border : COLORS.panel}
+                    justifyContent="center"
+                    alignItems="center"
+                    onMouseDown={() => cancelWork()}
+                    onMouseOver={() => setHoveredNav("cancel")}
+                    onMouseOut={() => setHoveredNav((h) => (h === "cancel" ? null : h))}
+                  >
+                    <text fg={COLORS.red}>Cancel</text>
+                  </box>
+                )}
               </box>
               <scrollbox
                 width="100%"
@@ -451,7 +739,7 @@ function App() {
                 }}
               >
                 {adding ? (
-                  <text fg={COLORS.yellow}>{addLog || "Working…"}</text>
+                  <text fg={COLORS.yellow}>{addLog || "Working…"} (Esc / Cancel)</text>
                 ) : addLog ? (
                   <text fg={addLog.startsWith("Done") ? COLORS.green : COLORS.text}>{addLog}</text>
                 ) : (
@@ -467,9 +755,11 @@ function App() {
 
       <box width="100%" height={1} backgroundColor={COLORS.panel} paddingLeft={1}>
         <text fg={COLORS.muted}>
-          click sidebar · 1–4 views · ↑↓/jk sources · Enter submit · q / Ctrl+C quit · query=
-          {query ? `"${query.slice(0, 40)}"` : "—"}
-          {addTarget && view === "add" ? ` · add="${addTarget.slice(0, 40)}"` : ""}
+          {busy
+            ? "busy · Esc / Cancel to stop · Ctrl+C quit"
+            : `click sidebar · 1–4 views · ↑↓/jk sources · Enter submit · q / Ctrl+C quit · query=${
+                query ? `"${query.slice(0, 40)}"` : "—"
+              }${addTarget && view === "add" ? ` · add="${addTarget.slice(0, 40)}"` : ""}`}
         </text>
       </box>
     </box>

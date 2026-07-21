@@ -7,7 +7,7 @@ import { ConfigSchema, type LocaldocConfig } from "./schema.ts";
 export type { LocaldocConfig };
 
 const DEFAULT_CONFIG_YAML = `# localdoc configuration
-# See https://github.com/localdoc/localdoc for docs
+# See https://github.com/Marius-brt/Local-Doc for docs
 
 data_dir: ~/.localdoc
 
@@ -44,13 +44,16 @@ crawl:
   timeout_ms: 30000
   playwright: auto
   respect_robots: true
-  proxy: null
   headers: {}
 
 http:
+  # One proxy for both http:// and https:// targets
   proxy: null
+  # proxy: http://127.0.0.1:7890
   headers: {}
   retries: 3
+  # Set false to allow self-signed / intercepting TLS (insecure)
+  reject_unauthorized: true
 `;
 
 export interface LoadedConfig {

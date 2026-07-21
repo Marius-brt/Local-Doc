@@ -55,9 +55,85 @@ bun run localdoc doctor
 ## Config
 
 Default path: `~/.config/localdoc/config.yml`  
-Override: `--config` or `LOCALDOC_CONFIG`
+Created automatically on first run with defaults. Override with `--config` or `LOCALDOC_CONFIG`.
 
-Data directory: `~/.localdoc/` (`index.db`, `models/`, `extracted/`, `browsers/`)
+Data directory (from `data_dir`): `~/.localdoc/` — `index.db`, `models/`, `extracted/`, `browsers/`, `bin/`.
+
+```yaml
+# ~/.config/localdoc/config.yml
+
+data_dir: ~/.localdoc
+
+embeddings:
+  # Local default (embedded Model2Vec sidecar)
+  provider: model2vec          # model2vec | openai_compatible
+  model: minishlab/potion-base-8M
+  # openai_compatible:
+  #   base_url: https://api.openai.com/v1
+  #   api_key_env: OPENAI_API_KEY
+  #   model: text-embedding-3-small
+
+rerank:
+  enabled: false
+  provider: none               # none | local | cohere
+  model: null
+  # cohere:
+  #   api_key_env: COHERE_API_KEY
+
+search:
+  rrf_k: 60                    # RRF fusion constant
+  fts_limit: 40                # FTS candidates before fusion
+  vector_limit: 40             # vector candidates before fusion
+  top_k: 12                    # results returned after fusion/rerank
+  budget_tokens: 2400          # context-pack token budget
+
+chunking:
+  chunk_size: 512
+  min_characters: 24
+  table_rows: 3
+
+crawl:
+  max_pages: 500
+  concurrency: 4
+  timeout_ms: 30000
+  playwright: auto             # auto | always | never
+  respect_robots: true
+  headers: {}
+
+http:
+  proxy: null                  # one proxy for http:// and https://
+  headers: {}
+  retries: 3
+  reject_unauthorized: true    # false = skip TLS verify (insecure)
+```
+
+| Section | Purpose |
+| --- | --- |
+| `data_dir` | Index DB, downloaded models, extracted pages, Playwright browsers |
+| `embeddings` | Vector embeddings — local Model2Vec by default, or any OpenAI-compatible API |
+| `rerank` | Optional second-pass ranking (`local` via Transformers.js, or Cohere) |
+| `search` | Hybrid FTS + vector fusion and context budget |
+| `chunking` | How ingested markdown is split |
+| `crawl` | Web ingest limits, Playwright policy, crawl headers |
+| `http` | Shared HTTP client: proxy, TLS, retries, headers |
+
+### Proxy & TLS
+
+Set a single `http.proxy` — Bun routes both **http://** and **https://** targets through it (same for Playwright browser fallback).
+
+```yaml
+http:
+  proxy: http://127.0.0.1:7890
+  # proxy: http://user:pass@proxy.example.com:8080
+  # proxy: socks5://127.0.0.1:1080
+
+  # Corporate / self-signed MITM proxies:
+  reject_unauthorized: false
+```
+
+Leave `proxy: null` for direct connections. `reject_unauthorized: false` disables certificate verification (insecure — only when you trust the network path).
+
+Changing `embeddings.model` (or provider) after you already indexed may require re-ingesting so vector dimensions stay consistent.
 
 ## Commands
 
@@ -91,7 +167,7 @@ bun run localdoc tui
 bun run localdoc   # opens TUI when run with no args in a TTY
 ```
 
-Keys: `1–4` switch views · `j/k` or arrows browse sources · Enter submit · `r` refresh · `q` / Ctrl+C quit.
+Keys: `1–4` switch views · `j/k` or arrows browse sources · `u` update selected · `U` update all · Enter submit · Esc / **Cancel** stops a running query or ingest · `r` refresh · `q` / Ctrl+C quit.
 
 ## Agent skills
 

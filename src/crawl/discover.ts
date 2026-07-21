@@ -49,10 +49,14 @@ function parseLlmsTxt(text: string, base: string): string[] {
   return [...new Set(urls)];
 }
 
-async function discoverLlmsFull(root: string, config: LocaldocConfig): Promise<string[] | null> {
+async function discoverLlmsFull(
+  root: string,
+  config: LocaldocConfig,
+  signal?: AbortSignal,
+): Promise<string[] | null> {
   const origin = originOf(root);
   for (const path of ["/llms-full.txt", "/docs/llms-full.txt"]) {
-    const body = await fetchOptional(origin + path, config);
+    const body = await fetchOptional(origin + path, config, signal);
     if (!body) continue;
     // llms-full is often one giant markdown doc — treat as single page
     if (body.length > 500 && !body.includes("http")) {
@@ -65,10 +69,14 @@ async function discoverLlmsFull(root: string, config: LocaldocConfig): Promise<s
   return null;
 }
 
-async function discoverLlms(root: string, config: LocaldocConfig): Promise<string[] | null> {
+async function discoverLlms(
+  root: string,
+  config: LocaldocConfig,
+  signal?: AbortSignal,
+): Promise<string[] | null> {
   const origin = originOf(root);
   for (const path of ["/llms.txt", "/docs/llms.txt"]) {
-    const body = await fetchOptional(origin + path, config);
+    const body = await fetchOptional(origin + path, config, signal);
     if (!body) continue;
     const urls = parseLlmsTxt(body, origin);
     if (urls.length > 0) return urls.slice(0, config.crawl.max_pages);
@@ -76,7 +84,12 @@ async function discoverLlms(root: string, config: LocaldocConfig): Promise<strin
   return null;
 }
 
-async function parseSitemapUrls(xml: string, config: LocaldocConfig, depth = 0): Promise<string[]> {
+async function parseSitemapUrls(
+  xml: string,
+  config: LocaldocConfig,
+  depth = 0,
+  signal?: AbortSignal,
+): Promise<string[]> {
   if (depth > 3) return [];
   const urls: string[] = [];
   const locRegex = /<loc>\s*([^<]+)\s*<\/loc>/gi;
@@ -89,9 +102,9 @@ async function parseSitemapUrls(xml: string, config: LocaldocConfig, depth = 0):
   for (const loc of locs) {
     if (urls.length >= config.crawl.max_pages) break;
     if (loc.endsWith(".xml") || loc.includes("sitemap")) {
-      const child = await fetchOptional(loc, config);
+      const child = await fetchOptional(loc, config, signal);
       if (child) {
-        const nested = await parseSitemapUrls(child, config, depth + 1);
+        const nested = await parseSitemapUrls(child, config, depth + 1, signal);
         for (const u of nested) {
           if (urls.length >= config.crawl.max_pages) break;
           urls.push(u);
@@ -104,7 +117,11 @@ async function parseSitemapUrls(xml: string, config: LocaldocConfig, depth = 0):
   return [...new Set(urls)];
 }
 
-async function discoverSitemap(root: string, config: LocaldocConfig): Promise<string[] | null> {
+async function discoverSitemap(
+  root: string,
+  config: LocaldocConfig,
+  signal?: AbortSignal,
+): Promise<string[] | null> {
   const origin = originOf(root);
   const candidates = [
     `${origin}/sitemap.xml`,
@@ -113,7 +130,7 @@ async function discoverSitemap(root: string, config: LocaldocConfig): Promise<st
     new URL("/sitemap.xml", root).toString(),
   ];
   for (const candidate of [...new Set(candidates)]) {
-    const body = await fetchOptional(candidate, config);
+    const body = await fetchOptional(candidate, config, signal);
     if (!body?.includes("<loc>")) continue;
     const urls = await parseSitemapUrls(body, config);
     if (urls.length > 0) return urls.slice(0, config.crawl.max_pages);
@@ -162,7 +179,11 @@ function extractNavLinks(html: string, base: string): string[] {
   return [...new Set(urls)];
 }
 
-async function discoverNavCrawl(root: string, config: LocaldocConfig): Promise<string[]> {
+async function discoverNavCrawl(
+  root: string,
+  config: LocaldocConfig,
+  signal?: AbortSignal,
+): Promise<string[]> {
   const seen = new Set<string>();
   const queue: string[] = [root];
   const results: string[] = [];
@@ -171,7 +192,7 @@ async function discoverNavCrawl(root: string, config: LocaldocConfig): Promise<s
     const url = queue.shift()!;
     if (seen.has(url)) continue;
     seen.add(url);
-    const res = await fetchText(url, config);
+    const res = await fetchText(url, config, signal);
     if (!res.ok) continue;
     results.push(res.url);
     const links = extractNavLinks(res.body, res.url);
@@ -187,10 +208,11 @@ async function discoverNavCrawl(root: string, config: LocaldocConfig): Promise<s
 export async function loadRobots(
   root: string,
   config: LocaldocConfig,
+  signal?: AbortSignal,
 ): Promise<{ isAllowed: (url: string) => boolean } | null> {
   if (!config.crawl.respect_robots) return null;
   const origin = originOf(root);
-  const body = await fetchOptional(`${origin}/robots.txt`, config);
+  const body = await fetchOptional(`${origin}/robots.txt`, config, signal);
   if (!body) return null;
   const robots = robotsParser(`${origin}/robots.txt`, body);
   return {
@@ -202,20 +224,26 @@ export async function discoverUrls(
   root: string,
   config: LocaldocConfig,
   forcedStrategy?: DiscoveryStrategy,
+  signal?: AbortSignal,
 ): Promise<DiscoveryResult> {
   const strategies: DiscoveryStrategy[] = forcedStrategy
     ? [forcedStrategy]
     : ["llms-full.txt", "llms.txt", "sitemap.xml", "nav-crawl"];
 
   for (const strategy of strategies) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled");
+      err.name = "AbortError";
+      throw err;
+    }
     let urls: string[] | null = null;
-    if (strategy === "llms-full.txt") urls = await discoverLlmsFull(root, config);
-    else if (strategy === "llms.txt") urls = await discoverLlms(root, config);
-    else if (strategy === "sitemap.xml") urls = await discoverSitemap(root, config);
-    else if (strategy === "nav-crawl") urls = await discoverNavCrawl(root, config);
+    if (strategy === "llms-full.txt") urls = await discoverLlmsFull(root, config, signal);
+    else if (strategy === "llms.txt") urls = await discoverLlms(root, config, signal);
+    else if (strategy === "sitemap.xml") urls = await discoverSitemap(root, config, signal);
+    else if (strategy === "nav-crawl") urls = await discoverNavCrawl(root, config, signal);
 
     if (urls && urls.length > 0) {
-      const robots = await loadRobots(root, config);
+      const robots = await loadRobots(root, config, signal);
       const filtered = robots ? urls.filter((u) => robots.isAllowed(u)) : urls;
       if (filtered.length > 0) {
         return { strategy, urls: filtered.slice(0, config.crawl.max_pages) };

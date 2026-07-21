@@ -1,6 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { LocaldocConfig } from "../config/schema.ts";
+import { buildFetchInit } from "../crawl/fetch.ts";
 import { collectFolderFiles, type FolderFile } from "./folder.ts";
 
 export function parseGithubUrl(input: string): {
@@ -100,6 +102,8 @@ export async function collectGithubFiles(
 /** Download raw file list via GitHub API (no git) as fallback. */
 export async function collectGithubViaApi(
   input: string,
+  config?: LocaldocConfig,
+  signal?: AbortSignal,
 ): Promise<{ rootUri: string; title: string; files: FolderFile[] }> {
   const parsed = parseGithubUrl(input);
   if (!parsed) throw new Error(`Not a GitHub URL: ${input}`);
@@ -107,12 +111,23 @@ export async function collectGithubViaApi(
   const title = `${parsed.owner}/${parsed.repo}`;
   const apiBase = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`;
 
-  const treeRes = await fetch(`${apiBase}/git/trees/${parsed.ref ?? "HEAD"}?recursive=1`, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      "User-Agent": "localdoc",
-    },
-  });
+  const treeInit = config
+    ? buildFetchInit(config, {
+        signal,
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "localdoc",
+        },
+      })
+    : {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "localdoc",
+        },
+        signal,
+      };
+
+  const treeRes = await fetch(`${apiBase}/git/trees/${parsed.ref ?? "HEAD"}?recursive=1`, treeInit);
   if (!treeRes.ok) {
     throw new Error(`GitHub API tree failed: HTTP ${treeRes.status}`);
   }
@@ -133,10 +148,19 @@ export async function collectGithubViaApi(
 
   const files: FolderFile[] = [];
   for (const item of paths) {
+    if (signal?.aborted) {
+      const err = new Error("Cancelled");
+      err.name = "AbortError";
+      throw err;
+    }
     const rawUrl = `https://raw.githubusercontent.com/${parsed.owner}/${parsed.repo}/${parsed.ref ?? "HEAD"}/${item.path}`;
-    const res = await fetch(rawUrl, {
-      headers: { "User-Agent": "localdoc" },
-    });
+    const fileInit = config
+      ? buildFetchInit(config, {
+          signal,
+          headers: { "User-Agent": "localdoc" },
+        })
+      : { headers: { "User-Agent": "localdoc" }, signal };
+    const res = await fetch(rawUrl, fileInit);
     if (!res.ok) continue;
     const content = await res.text();
     files.push({

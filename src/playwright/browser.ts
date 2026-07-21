@@ -113,13 +113,26 @@ export async function fetchWithPlaywright(
 ): Promise<{ ok: boolean; url: string; body: string; error?: string }> {
   try {
     const browser = await getBrowser(dataDir, onProgress);
-    const page = await browser.newPage({
-      userAgent: "localdoc/0.1 (+https://github.com/localdoc/localdoc; docs indexer)",
+    const contextOpts: {
+      userAgent: string;
+      extraHTTPHeaders: Record<string, string>;
+      ignoreHTTPSErrors?: boolean;
+      proxy?: { server: string };
+    } = {
+      userAgent: "localdoc/0.1 (+https://github.com/Marius-brt/Local-Doc; docs indexer)",
       extraHTTPHeaders: {
         ...config.http.headers,
         ...config.crawl.headers,
       },
-    });
+    };
+    if (!config.http.reject_unauthorized) {
+      contextOpts.ignoreHTTPSErrors = true;
+    }
+    if (config.http.proxy) {
+      contextOpts.proxy = { server: config.http.proxy };
+    }
+    const context = await browser.newContext(contextOpts);
+    const page = await context.newPage();
     try {
       onProgress?.(`Fetching via browser: ${url}`);
       const res = await page.goto(url, {
@@ -134,7 +147,7 @@ export async function fetchWithPlaywright(
         error: res?.ok() ? undefined : `HTTP ${res?.status() ?? 0}`,
       };
     } finally {
-      await page.close();
+      await context.close();
     }
   } catch (err) {
     return {

@@ -52,6 +52,12 @@ If configured, \`localdoc mcp serve\` exposes \`query\`, \`list\`, and \`inspect
 In OpenCode these appear as \`localdoc_query\`, \`localdoc_list\`, and \`localdoc_inspect\` — prefer them over shelling out when available.
 MCP \`query\` accepts optional \`kinds\`, \`sources\`, and \`keywords\` arrays.
 
+## Search tips
+
+- Query in the language of the docs; hybrid search is multilingual (FTS unicode61 + vectors). CJK and other non-whitespace scripts rely mainly on embeddings.
+- Use \`--kind\` / \`--source\` / \`--keyword\` to narrow results when the corpus is large.
+- Prefer enabling a multilingual rerank provider in config when precision matters.
+
 ## Common mistakes
 
 - Do not run \`localdoc query\` before adding a source with \`localdoc add\`. Check \`localdoc list\` first.

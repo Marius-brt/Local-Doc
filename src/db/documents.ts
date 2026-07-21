@@ -11,6 +11,7 @@ export interface DocumentRow {
   extracted_path: string | null;
   status: string;
   error: string | null;
+  meta_json: string;
 }
 
 export async function upsertDocument(
@@ -62,6 +63,21 @@ export async function upsertDocument(
     extracted_path: input.extractedPath ?? null,
     status: input.status ?? "ok",
     error: input.error ?? null,
+    meta_json: JSON.stringify(input.meta ?? {}),
+  };
+}
+
+function rowToDocument(row: Record<string, unknown>): DocumentRow {
+  return {
+    id: String(row.id),
+    source_id: String(row.source_id),
+    uri: String(row.uri),
+    title: row.title == null ? null : String(row.title),
+    content_hash: row.content_hash == null ? null : String(row.content_hash),
+    extracted_path: row.extracted_path == null ? null : String(row.extracted_path),
+    status: String(row.status),
+    error: row.error == null ? null : String(row.error),
+    meta_json: String(row.meta_json ?? "{}"),
   };
 }
 
@@ -76,16 +92,49 @@ export async function getDocumentByUri(
   });
   const row = res.rows[0];
   if (!row) return null;
-  return {
-    id: String(row.id),
-    source_id: String(row.source_id),
-    uri: String(row.uri),
-    title: row.title == null ? null : String(row.title),
-    content_hash: row.content_hash == null ? null : String(row.content_hash),
-    extracted_path: row.extracted_path == null ? null : String(row.extracted_path),
-    status: String(row.status),
-    error: row.error == null ? null : String(row.error),
-  };
+  return rowToDocument(row as Record<string, unknown>);
+}
+
+export function documentExtractorVersion(doc: DocumentRow): number | null {
+  try {
+    const meta = JSON.parse(doc.meta_json || "{}") as { extractor_version?: unknown };
+    const v = meta.extractor_version;
+    return typeof v === "number" ? v : typeof v === "string" ? Number(v) || null : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function listDocumentUris(
+  db: Client,
+  sourceId: string,
+): Promise<Array<{ id: string; uri: string }>> {
+  const res = await db.execute({
+    sql: "SELECT id, uri FROM documents WHERE source_id = ?",
+    args: [sourceId],
+  });
+  return res.rows.map((r) => ({ id: String(r.id), uri: String(r.uri) }));
+}
+
+export async function deleteDocument(db: Client, documentId: string): Promise<void> {
+  await deleteChunksForDocument(db, documentId);
+  await db.execute({ sql: "DELETE FROM documents WHERE id = ?", args: [documentId] });
+}
+
+/** Remove documents whose URI is not in `keepUris`. */
+export async function pruneDocumentsNotIn(
+  db: Client,
+  sourceId: string,
+  keepUris: Set<string>,
+): Promise<number> {
+  const docs = await listDocumentUris(db, sourceId);
+  let removed = 0;
+  for (const doc of docs) {
+    if (keepUris.has(doc.uri)) continue;
+    await deleteDocument(db, doc.id);
+    removed++;
+  }
+  return removed;
 }
 
 export async function deleteChunksForDocument(db: Client, documentId: string): Promise<void> {
@@ -109,6 +158,7 @@ export async function insertChunks(
     text: string;
     heading?: string | null;
     sectionPath?: string | null;
+    title?: string | null;
     startOffset?: number | null;
     endOffset?: number | null;
     contentHash: string;
@@ -118,8 +168,8 @@ export async function insertChunks(
   const ts = nowIso();
   for (const c of chunks) {
     await db.execute({
-      sql: `INSERT INTO chunks (id, document_id, source_id, chunk_index, text, heading, section_path, start_offset, end_offset, content_hash, meta_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO chunks (id, document_id, source_id, chunk_index, text, heading, section_path, title, start_offset, end_offset, content_hash, meta_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         c.id,
         c.documentId,
@@ -128,6 +178,7 @@ export async function insertChunks(
         c.text,
         c.heading ?? null,
         c.sectionPath ?? null,
+        c.title ?? null,
         c.startOffset ?? null,
         c.endOffset ?? null,
         c.contentHash,

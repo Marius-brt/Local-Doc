@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml";
 import { ConfigSchema } from "../../config/schema.ts";
 import { getDb } from "../../db/client.ts";
 import { countStats } from "../../db/documents.ts";
+import { EXTRACTOR_VERSION } from "../../extract/html.ts";
 import { getLogPath, log } from "../../util/log.ts";
 import { createCtx } from "../context.ts";
 
@@ -59,6 +60,7 @@ export default defineCommand({
     );
 
     const configCheck = await validateConfigFile(loaded.configPath);
+    const embeddingsComplete = stats.chunks === 0 || stats.embeddings >= stats.chunks;
     const checks: Array<[string, boolean, string]> = [
       ["config schema", configCheck.ok, configCheck.detail],
       ["log file", logPath != null && (await exists(logPath)), logPath ?? "—"],
@@ -73,6 +75,13 @@ export default defineCommand({
         await exists(join(loaded.dataDir, "last-ingest-report.json")),
         join(loaded.dataDir, "last-ingest-report.json"),
       ],
+      [
+        "embeddings coverage",
+        embeddingsComplete,
+        embeddingsComplete
+          ? `${stats.embeddings}/${stats.chunks}`
+          : `${stats.embeddings}/${stats.chunks} — run TUI re-embed (I) or re-ingest for hybrid search`,
+      ],
     ];
 
     for (const [name, ok, detail] of checks) {
@@ -82,10 +91,53 @@ export default defineCommand({
       if (!ok) log.warn(`doctor check failed: ${name} — ${detail}`);
     }
 
+    // Heading breadcrumbs / embed prefixes need a re-ingest after upgrades.
+    const sample = await db.execute(
+      `SELECT section_path FROM chunks WHERE section_path IS NOT NULL LIMIT 5`,
+    );
+    const looksLikeUri = sample.rows.some((r) => {
+      const p = String(r.section_path ?? "");
+      return /^https?:\/\//i.test(p) || p.includes("://");
+    });
+    if (looksLikeUri && stats.chunks > 0) {
+      console.log(
+        chalk.yellow(
+          "hint: chunk section_path still looks like a URI — run `localdoc update` to refresh headings/breadcrumbs for better search",
+        ),
+      );
+      log.warn("doctor: legacy section_path detected; reindex recommended");
+    }
+
+    const staleExtract = await db.execute({
+      sql: `SELECT COUNT(*) AS n FROM documents
+            WHERE status = 'ok'
+              AND (
+                json_extract(meta_json, '$.extractor_version') IS NULL
+                OR json_extract(meta_json, '$.extractor_version') < ?
+              )`,
+      args: [EXTRACTOR_VERSION],
+    });
+    const staleN = Number(staleExtract.rows[0]?.n ?? 0);
+    if (staleN > 0) {
+      console.log(
+        chalk.yellow(
+          `hint: ${staleN} documents on an older extractor (current v${EXTRACTOR_VERSION}) — run \`localdoc update\` to re-extract/rechunk`,
+        ),
+      );
+      log.warn(`doctor: ${staleN} docs with stale extractor_version`);
+    }
+
     console.log(`Embeddings provider: ${loaded.config.embeddings.provider}`);
     console.log(
       `Rerank: ${loaded.config.rerank.enabled ? loaded.config.rerank.provider : "disabled"}`,
     );
+    if (!loaded.config.rerank.enabled) {
+      console.log(
+        chalk.dim(
+          "tip: enable a multilingual rerank provider (cohere / openai-compatible) for higher precision",
+        ),
+      );
+    }
     console.log(`Playwright mode: ${loaded.config.crawl.playwright}`);
     console.log(`Log level: ${loaded.config.log.level}`);
     log.info("doctor complete");

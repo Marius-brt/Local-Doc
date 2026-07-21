@@ -10,7 +10,7 @@ MIT licensed. Single-file executables via Bun.
 
 - Smart web crawl: `llms-full.txt` → `llms.txt` → sitemap → nav crawl
 - Site adapters (Mintlify, GitBook, Docusaurus, ReadMe, Sphinx) + boilerplate stripping
-- Hybrid search: FTS5 (BM25) + vectors, fused with RRF; optional Cohere / llama.cpp (`openai`) / local rerank
+- Hybrid multilingual search: FTS5 (BM25, unicode61) + vectors, fused with RRF; optional Cohere / llama.cpp (`openai`) / local rerank
 - Default local embeddings via embedded Model2Vec Rust sidecar (`minishlab/potion-base-8M`); Transformers.js bundled for local rerank; OpenAI-compatible embeddings optional
 - Prisma migrations for the schema (FTS triggers included in SQL migrations)
 - Playwright auto-fallback for JS-heavy or blocked pages (downloaded on first use)
@@ -96,11 +96,13 @@ search:
   vector_limit: 40             # vector candidates before fusion
   top_k: 12                    # results returned after fusion/rerank
   budget_tokens: 2400          # context-pack token budget
+  max_per_document: 2          # diversify: max chunks per page in results
 
 chunking:
   chunk_size: 512
   min_characters: 24
   table_rows: 3
+  overlap: 64                  # chars of previous chunk prepended to next
 
 crawl:
   max_pages: 500
@@ -222,7 +224,7 @@ bun run localdoc tui
 bun run localdoc   # opens TUI when run with no args in a TTY
 ```
 
-Keys: `1–4` switch views · `j/k` or arrows browse sources · `u` update · `U` update all · `I` re-embed all (embeddings only, no re-fetch) · `d` remove · Enter submit · Esc / **Cancel** stops running work · `r` refresh · `q` / Ctrl+C quit.
+Keys: `1–4` switch views · `j/k` or arrows browse sources · `u` update · `U` update all · `I` re-embed all (embeddings only, no re-fetch) · `d` remove · Enter submit · Esc / **Cancel** stops running work · `r` refresh · drag to select · Cmd+C (macOS) / Ctrl+C (Windows/Linux) to copy · `q` quit (Ctrl+C also quits on macOS, or on Windows/Linux when nothing is selected).
 
 ## Agent skills
 
@@ -276,6 +278,14 @@ localdoc mcp serve
 ```
 
 Tools: `query` (optional `kinds`, `sources`, `keywords`), `list`, `inspect`.
+
+## Search quality notes
+
+- Lexical FTS is **unicode-aware** (no English-only stemming). A compact multilingual stopword list + AND/NEAR improves precision for Latin-script queries.
+- Whitespace FTS is weak for **CJK** and other non-segmented scripts — keep embeddings enabled so hybrid/vector recall covers those queries.
+- After upgrading, run `localdoc update` (headings/breadcrumbs, extract sanitize, version dedupe) and/or TUI re-embed (`I`) so structure-aware embeddings and FTS title weights apply to existing indexes. `localdoc doctor` warns when documents are on an older extractor version.
+- Discovery scopes URLs under the added root path and prefers unversioned pages over `/vX.Y/` mirrors when both exist.
+- For higher precision, enable a **multilingual** rerank provider (`cohere` or `openai`-compatible) in config.
 
 ## Build executables
 

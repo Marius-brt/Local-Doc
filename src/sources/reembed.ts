@@ -4,6 +4,7 @@ import { nowIso } from "../db/client.ts";
 import { insertEmbedding } from "../db/documents.ts";
 import { getVectorDims, rebuildVectorTable } from "../db/vector-index.ts";
 import { tryCreateEmbedder } from "../embed/index.ts";
+import { embedTextForChunk } from "../search/embed-text.ts";
 
 export interface ReembedProgress {
   phase: string;
@@ -66,14 +67,25 @@ export async function reembedChunks(
 
   const res = options.sourceId
     ? await db.execute({
-        sql: "SELECT id, text FROM chunks WHERE source_id = ? ORDER BY rowid",
+        sql: `SELECT c.id, c.text, c.section_path, c.title, d.title AS doc_title
+              FROM chunks c
+              JOIN documents d ON d.id = c.document_id
+              WHERE c.source_id = ?
+              ORDER BY c.rowid`,
         args: [options.sourceId],
       })
-    : await db.execute("SELECT id, text FROM chunks ORDER BY rowid");
+    : await db.execute(`SELECT c.id, c.text, c.section_path, c.title, d.title AS doc_title
+                        FROM chunks c
+                        JOIN documents d ON d.id = c.document_id
+                        ORDER BY c.rowid`);
 
   const chunks = res.rows.map((r) => ({
     id: String(r.id),
     text: String(r.text ?? ""),
+    sectionPath: r.section_path == null ? null : String(r.section_path),
+    title:
+      (r.title == null ? null : String(r.title)) ||
+      (r.doc_title == null ? null : String(r.doc_title)),
   }));
 
   if (chunks.length === 0) {
@@ -92,8 +104,15 @@ export async function reembedChunks(
   progress({ phase: "probe", message: "Probing embedding dimensions…" });
   await yieldToUi();
   throwIfAborted(options.signal);
-  const probeText = chunks.find((c) => c.text.trim())?.text || "dimension probe";
-  const [probeVec] = await embedder.embed([probeText.slice(0, 2000)], options.signal);
+  const probeChunk = chunks.find((c) => c.text.trim());
+  const probeText = probeChunk
+    ? embedTextForChunk({
+        title: probeChunk.title,
+        sectionPath: probeChunk.sectionPath,
+        text: probeChunk.text,
+      }).slice(0, 2000)
+    : "dimension probe";
+  const [probeVec] = await embedder.embed([probeText], options.signal);
   const dims = probeVec?.length ?? 0;
   if (dims <= 0) {
     throw new Error("Embedder returned an empty vector — cannot rebuild vector index");
@@ -140,7 +159,9 @@ export async function reembedChunks(
     });
 
     const vectors = await embedder.embed(
-      batch.map((c) => c.text),
+      batch.map((c) =>
+        embedTextForChunk({ title: c.title, sectionPath: c.sectionPath, text: c.text }),
+      ),
       options.signal,
     );
     throwIfAborted(options.signal);

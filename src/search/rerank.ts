@@ -5,6 +5,8 @@ import type { LocaldocConfig } from "../config/schema.ts";
 import { buildFetchInit } from "../crawl/fetch.ts";
 import { resolveApiKey } from "../util/api-key.ts";
 import { flushLog, formatError, log } from "../util/log.ts";
+import { expandHome } from "../util/paths.ts";
+import { rerankDocumentText } from "./embed-text.ts";
 import type { SearchHit } from "./hybrid.ts";
 
 export type RankedHit = SearchHit;
@@ -13,6 +15,7 @@ export async function rerankResults(
   query: string,
   hits: RankedHit[],
   config: LocaldocConfig,
+  dataDir?: string,
 ): Promise<RankedHit[]> {
   if (hits.length === 0) return hits;
 
@@ -23,9 +26,13 @@ export async function rerankResults(
     return rerankOpenAI(query, hits, config);
   }
   if (config.rerank.provider === "local") {
-    return rerankLocal(query, hits, config);
+    return rerankLocal(query, hits, config, dataDir);
   }
   return hits;
+}
+
+function documentsForRerank(hits: RankedHit[]): string[] {
+  return hits.map((h) => rerankDocumentText(h));
 }
 
 function optionalRerankApiKey(config: LocaldocConfig, fallbackDollarEnv: string): string | null {
@@ -61,7 +68,7 @@ async function rerankCohere(
     const cohere = createCohere({ apiKey, baseURL });
     const { ranking } = await rerank({
       model: cohere.reranking(modelId),
-      documents: hits.map((h) => h.text),
+      documents: documentsForRerank(hits),
       query,
       topN: hits.length,
     });
@@ -107,7 +114,7 @@ async function rerankOpenAI(
 
   const body: Record<string, unknown> = {
     query,
-    documents: hits.map((h) => h.text),
+    documents: documentsForRerank(hits),
     top_n: hits.length,
   };
   if (modelId) body.model = modelId;
@@ -180,31 +187,40 @@ async function rerankLocal(
   query: string,
   hits: RankedHit[],
   config: LocaldocConfig,
+  dataDir?: string,
 ): Promise<RankedHit[]> {
   const modelId = config.rerank.model ?? "Xenova/ms-marco-MiniLM-L-6-v2";
-  const dataDir = join(process.env.HOME ?? ".", ".localdoc");
+  const resolvedDataDir = dataDir ?? expandHome(config.data_dir);
   const { ensureOnnxNatives } = await import("../embed/onnx-natives.ts");
-  await ensureOnnxNatives(dataDir);
+  await ensureOnnxNatives(resolvedDataDir);
   const { pipeline, env } = await import("@huggingface/transformers");
   if (!env.cacheDir) {
-    env.cacheDir = join(dataDir, "models");
+    env.cacheDir = join(resolvedDataDir, "models");
   }
 
   type Ranker = (
     pairs: { text: string; text_pair: string }[],
-  ) => Promise<{ data: Float32Array } | Float32Array | number[]>;
+  ) => Promise<{ data: Float32Array } | Float32Array | number[] | Array<{ score?: number }>>;
 
   let ranker: Ranker;
   try {
+    // Cross-encoder style: text-classification on (query, document) pairs.
+    // Not all models expose a proper rerank head — gate failures clearly.
     ranker = (await pipeline("text-classification", modelId)) as Ranker;
-  } catch {
+  } catch (err) {
+    log.warn(
+      `local rerank pipeline unavailable (model=${modelId}): ${formatError(err)}; returning unre-ranked hits`,
+    );
+    await flushLog();
     return hits;
   }
 
+  const docs = documentsForRerank(hits);
   const scored: RankedHit[] = [];
-  for (const hit of hits) {
+  for (let i = 0; i < hits.length; i++) {
+    const hit = hits[i]!;
     try {
-      const out = await ranker([{ text: query, text_pair: hit.text }]);
+      const out = await ranker([{ text: query, text_pair: docs[i]! }]);
       let score = hit.score;
       if (out && typeof out === "object" && "data" in out) {
         score = Number((out as { data: Float32Array }).data[0] ?? score);
@@ -216,7 +232,8 @@ async function rerankLocal(
         }
       }
       scored.push({ ...hit, score });
-    } catch {
+    } catch (err) {
+      log.debug(`local rerank score failed for chunk ${hit.chunkId}: ${formatError(err)}`);
       scored.push(hit);
     }
   }

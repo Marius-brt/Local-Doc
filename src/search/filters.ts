@@ -51,44 +51,63 @@ export function hasSearchFilters(filters: SearchFilters | undefined): boolean {
   );
 }
 
+export interface BuildFilterSqlOptions {
+  /**
+   * When false, omit keyword `instr` predicates (use FTS MATCH for keywords instead).
+   * Default true for LIKE / vector SQL paths.
+   */
+  includeKeywords?: boolean;
+}
+
 /** Build `AND …` SQL predicates for chunk filters. Uses table alias `c` by default. */
 export function buildFilterSql(
   filters: SearchFilters | undefined,
   alias = "c",
+  options: BuildFilterSqlOptions = {},
 ): { sql: string; args: string[] } {
-  if (!hasSearchFilters(filters)) return { sql: "", args: [] };
+  const includeKeywords = options.includeKeywords !== false;
+  if (!filters) return { sql: "", args: [] };
 
   const parts: string[] = [];
   const args: string[] = [];
 
-  if (filters!.sourceIds?.length) {
-    parts.push(`${alias}.source_id IN (${filters!.sourceIds.map(() => "?").join(", ")})`);
-    args.push(...filters!.sourceIds);
+  if (filters.sourceIds?.length) {
+    parts.push(`${alias}.source_id IN (${filters.sourceIds.map(() => "?").join(", ")})`);
+    args.push(...filters.sourceIds);
   }
-  if (filters!.kinds?.length) {
+  if (filters.kinds?.length) {
     parts.push(
-      `json_extract(${alias}.meta_json, '$.kind') IN (${filters!.kinds.map(() => "?").join(", ")})`,
+      `json_extract(${alias}.meta_json, '$.kind') IN (${filters.kinds.map(() => "?").join(", ")})`,
     );
-    args.push(...filters!.kinds);
+    args.push(...filters.kinds);
   }
-  if (filters!.keywords?.length) {
-    for (const kw of filters!.keywords) {
+  if (includeKeywords && filters.keywords?.length) {
+    for (const kw of filters.keywords) {
       parts.push(`instr(lower(${alias}.text), lower(?)) > 0`);
       args.push(kw);
     }
   }
 
+  if (parts.length === 0) return { sql: "", args: [] };
   return { sql: ` AND ${parts.join(" AND ")}`, args };
 }
 
-/** Keep hits that still satisfy filters (post-vector_top_k safety net for keywords/sources). */
+/** Keep hits that still satisfy filters (post-vector_top_k safety net). */
 export function hitMatchesFilters(
-  hit: { sourceId: string; text: string },
+  hit: { sourceId: string; text: string; kind?: string | null },
   filters: SearchFilters | undefined,
 ): boolean {
   if (!hasSearchFilters(filters)) return true;
   if (filters!.sourceIds?.length && !filters!.sourceIds.includes(hit.sourceId)) {
     return false;
+  }
+  if (filters!.kinds?.length) {
+    const kind = hit.kind ?? null;
+    // Legacy chunks without kind: allow through only if we cannot tell (null).
+    // If kind is present and not in the allow-list, reject.
+    if (kind != null && !filters!.kinds.includes(kind as ChunkKind)) {
+      return false;
+    }
   }
   if (filters!.keywords?.length) {
     const lower = hit.text.toLowerCase();

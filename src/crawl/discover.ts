@@ -2,6 +2,7 @@ import { parseHTML } from "linkedom";
 import robotsParser from "robots-parser";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { fetchOptional, fetchText } from "./fetch.ts";
+import { dedupeVersionedUrls, filterUrlsForRoot, isUnderRoot, normalizeUrl } from "./urls.ts";
 
 export type DiscoveryStrategy = "llms-full.txt" | "llms.txt" | "sitemap.xml" | "nav-crawl";
 
@@ -18,9 +19,8 @@ function originOf(url: string): string {
 function resolveUrl(base: string, href: string): string | null {
   try {
     const u = new URL(href, base);
-    u.hash = "";
     if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-    return u.toString();
+    return normalizeUrl(u.toString());
   } catch {
     return null;
   }
@@ -185,7 +185,8 @@ async function discoverNavCrawl(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const seen = new Set<string>();
-  const queue: string[] = [root];
+  const rootNorm = normalizeUrl(root);
+  const queue: string[] = [rootNorm];
   const results: string[] = [];
 
   while (queue.length > 0 && results.length < config.crawl.max_pages) {
@@ -194,8 +195,15 @@ async function discoverNavCrawl(
     seen.add(url);
     const res = await fetchText(url, config, signal);
     if (!res.ok) continue;
-    results.push(res.url);
-    const links = extractNavLinks(res.body, res.url);
+    let finalUrl = res.url;
+    try {
+      finalUrl = normalizeUrl(res.url);
+    } catch {
+      // keep
+    }
+    if (!isUnderRoot(finalUrl, rootNorm)) continue;
+    results.push(finalUrl);
+    const links = extractNavLinks(res.body, finalUrl).filter((l) => isUnderRoot(l, rootNorm));
     for (const link of links) {
       if (!seen.has(link) && results.length + queue.length < config.crawl.max_pages * 2) {
         queue.push(link);
@@ -244,12 +252,14 @@ export async function discoverUrls(
 
     if (urls && urls.length > 0) {
       const robots = await loadRobots(root, config, signal);
-      const filtered = robots ? urls.filter((u) => robots.isAllowed(u)) : urls;
+      let filtered = robots ? urls.filter((u) => robots.isAllowed(u)) : urls;
+      filtered = filterUrlsForRoot(filtered, root);
+      filtered = dedupeVersionedUrls(filtered);
       if (filtered.length > 0) {
         return { strategy, urls: filtered.slice(0, config.crawl.max_pages) };
       }
     }
   }
 
-  return { strategy: "nav-crawl", urls: [root] };
+  return { strategy: "nav-crawl", urls: [normalizeUrl(root)] };
 }

@@ -46,4 +46,13 @@ describe("search filters", () => {
     expect(hitMatchesFilters(hit, { sourceIds: ["other"] })).toBe(false);
     expect(hitMatchesFilters(hit, { keywords: ["missing"] })).toBe(false);
   });
+
+  test("buildFilterSql can omit keywords for FTS path", () => {
+    const { sql, args } = buildFilterSql({ kinds: ["code"], keywords: ["Bearer"] }, "c", {
+      includeKeywords: false,
+    });
+    expect(sql).toContain("kind");
+    expect(sql).not.toContain("instr");
+    expect(args).toEqual(["code"]);
+  });
 });

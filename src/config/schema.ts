@@ -105,6 +105,8 @@ export const ConfigSchema = z.object({
       vector_limit: z.number().int().positive().default(40),
       top_k: z.number().int().positive().default(12),
       budget_tokens: z.number().int().positive().default(2400),
+      /** Max chunks from the same document in the ranked list (diversity). */
+      max_per_document: z.number().int().positive().default(2),
     })
     .default({
       rrf_k: 60,
@@ -112,17 +114,21 @@ export const ConfigSchema = z.object({
       vector_limit: 40,
       top_k: 12,
       budget_tokens: 2400,
+      max_per_document: 2,
     }),
   chunking: z
     .object({
       chunk_size: z.number().int().positive().default(512),
       min_characters: z.number().int().positive().default(24),
       table_rows: z.number().int().positive().default(3),
+      /** Characters of previous chunk prepended to the next (prose). */
+      overlap: z.number().int().nonnegative().default(64),
     })
     .default({
       chunk_size: 512,
       min_characters: 24,
       table_rows: 3,
+      overlap: 64,
     }),
   crawl: z
     .object({

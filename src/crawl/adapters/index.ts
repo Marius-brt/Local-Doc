@@ -1,11 +1,4 @@
-import { parseHTML } from "linkedom";
-import TurndownService from "turndown";
-import { type ExtractedPage, htmlToMarkdown } from "../../extract/html.ts";
-
-const turndown = new TurndownService({
-  headingStyle: "atx",
-  codeBlockStyle: "fenced",
-});
+import { type ExtractedPage, extractWithRootSelector, htmlToMarkdown } from "../../extract/html.ts";
 
 export interface SiteAdapter {
   name: string;
@@ -14,18 +7,7 @@ export interface SiteAdapter {
 }
 
 function extractWithSelector(html: string, selectors: string[], name: string): ExtractedPage {
-  const base = htmlToMarkdown(html);
-  const { document } = parseHTML(html);
-  for (const sel of selectors) {
-    const el = document.querySelector(sel);
-    if (el && (el.textContent?.trim().length ?? 0) > 80) {
-      const markdown = turndown.turndown(el.innerHTML || "").trim();
-      if (markdown.length > 40) {
-        return { title: base.title, markdown, adapter: name };
-      }
-    }
-  }
-  return { ...base, adapter: name };
+  return extractWithRootSelector(html, selectors, name);
 }
 
 export const mintlifyAdapter: SiteAdapter = {

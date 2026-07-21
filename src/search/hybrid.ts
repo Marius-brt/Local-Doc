@@ -2,16 +2,19 @@ import type { Client } from "@libsql/client";
 import type { LocaldocConfig } from "../config/schema.ts";
 import type { Embedder } from "../embed/index.ts";
 import { flushLog, formatError, log } from "../util/log.ts";
+import { expandHome } from "../util/paths.ts";
 import {
   buildFilterSql,
   hasSearchFilters,
   hitMatchesFilters,
   type SearchFilters,
 } from "./filters.ts";
+import { buildFtsQuery, significantTokens } from "./fts-query.ts";
 import { type RankedHit, rerankResults } from "./rerank.ts";
 
 export type { ChunkKind, SearchFilters } from "./filters.ts";
 export { parseChunkKinds, splitList } from "./filters.ts";
+export { buildFtsQuery, significantTokens } from "./fts-query.ts";
 
 export interface SearchHit {
   chunkId: string;
@@ -23,6 +26,7 @@ export interface SearchHit {
   uri: string;
   title: string | null;
   score: number;
+  kind?: string | null;
 }
 
 function rrfFuse(lists: SearchHit[][], k: number): Map<string, { hit: SearchHit; score: number }> {
@@ -41,31 +45,8 @@ function rrfFuse(lists: SearchHit[][], k: number): Map<string, { hit: SearchHit;
   return scores;
 }
 
-function escapeFtsToken(token: string): string | null {
-  const cleaned = token.replace(/["']/g, " ").trim();
-  if (!cleaned) return null;
-  return `"${cleaned}"`;
-}
-
-function escapeFts(query: string): string {
-  return query
-    .split(/\s+/)
-    .map(escapeFtsToken)
-    .filter((t): t is string => Boolean(t))
-    .join(" OR ");
-}
-
-/** Natural-language query ORed, with required keywords ANDed. */
-function buildFtsMatch(query: string, keywords: string[] | undefined): string {
-  const base = escapeFts(query);
-  const required = (keywords ?? []).map(escapeFtsToken).filter((t): t is string => Boolean(t));
-  if (!base && required.length === 0) return "";
-  if (!base) return required.join(" AND ");
-  if (required.length === 0) return base;
-  return `(${base}) AND ${required.join(" AND ")}`;
-}
-
 function rowToHit(row: Record<string, unknown>, score: number): SearchHit {
+  const kindRaw = row.kind;
   return {
     chunkId: String(row.chunk_id),
     documentId: String(row.document_id),
@@ -76,7 +57,44 @@ function rowToHit(row: Record<string, unknown>, score: number): SearchHit {
     uri: String(row.uri),
     title: row.title == null ? null : String(row.title),
     score,
+    kind: kindRaw == null ? null : String(kindRaw),
   };
+}
+
+const HIT_SELECT = `
+  c.id AS chunk_id, c.document_id, c.source_id, c.text, c.heading, c.section_path,
+  d.uri, d.title, json_extract(c.meta_json, '$.kind') AS kind
+`;
+
+/** Only searchable documents contribute to hybrid results. */
+const DOC_OK = ` AND d.status = 'ok'`;
+
+/** Weighted BM25: text, heading, section_path, title (title may be absent on very old DBs). */
+const BM25_WEIGHTED = "bm25(chunks_fts, 1.0, 8.0, 2.0, 6.0)";
+const BM25_LEGACY = "bm25(chunks_fts, 1.0, 8.0, 2.0)";
+
+async function ftsMatchOnce(
+  db: Client,
+  match: string,
+  limit: number,
+  filterSql: string,
+  filterArgs: string[],
+  weighted: boolean,
+): Promise<SearchHit[]> {
+  const bm25 = weighted ? BM25_WEIGHTED : BM25_LEGACY;
+  const res = await db.execute({
+    sql: `
+      SELECT ${HIT_SELECT}, ${bm25} AS rank
+      FROM chunks_fts
+      JOIN chunks c ON c.rowid = chunks_fts.rowid
+      JOIN documents d ON d.id = c.document_id
+      WHERE chunks_fts MATCH ?${filterSql}${DOC_OK}
+      ORDER BY rank
+      LIMIT ?
+    `,
+    args: [match, ...filterArgs, limit],
+  });
+  return res.rows.map((row) => rowToHit(row as Record<string, unknown>, -Number(row.rank ?? 0)));
 }
 
 async function ftsSearch(
@@ -85,64 +103,75 @@ async function ftsSearch(
   limit: number,
   filters?: SearchFilters,
 ): Promise<SearchHit[]> {
-  const ftsQuery = buildFtsMatch(query, filters?.keywords);
-  const filter = buildFilterSql(filters);
-  if (!ftsQuery && !hasSearchFilters(filters)) return [];
+  const built = buildFtsQuery(query, filters?.keywords);
+  // Keywords are in MATCH; omit duplicate instr predicates on the FTS path.
+  const filter = buildFilterSql(filters, "c", { includeKeywords: false });
+  if (!built.primary && !hasSearchFilters(filters)) return [];
 
-  if (ftsQuery) {
+  const tryMatch = async (match: string): Promise<SearchHit[] | null> => {
+    if (!match) return null;
     try {
-      const res = await db.execute({
-        sql: `
-          SELECT c.id AS chunk_id, c.document_id, c.source_id, c.text, c.heading, c.section_path,
-                 d.uri, d.title, bm25(chunks_fts) AS rank
-          FROM chunks_fts
-          JOIN chunks c ON c.rowid = chunks_fts.rowid
-          JOIN documents d ON d.id = c.document_id
-          WHERE chunks_fts MATCH ?${filter.sql}
-          ORDER BY rank
-          LIMIT ?
-        `,
-        args: [ftsQuery, ...filter.args, limit],
-      });
-      return res.rows.map((row) =>
-        rowToHit(row as Record<string, unknown>, -Number(row.rank ?? 0)),
-      );
+      return await ftsMatchOnce(db, match, limit, filter.sql, filter.args, true);
     } catch {
-      // Fallback LIKE search if FTS query fails
+      // Older 3-column FTS: retry without title weight.
+      try {
+        return await ftsMatchOnce(db, match, limit, filter.sql, filter.args, false);
+      } catch (err2) {
+        log.warn(`FTS MATCH failed: ${formatError(err2)}; falling back`);
+        await flushLog();
+        return null;
+      }
+    }
+  };
+
+  if (built.primary) {
+    const primaryHits = await tryMatch(built.primary);
+    if (primaryHits && primaryHits.length > 0) return primaryHits;
+    // Soft OR fallback when AND/NEAR is too strict.
+    if (built.fallbackOr && built.fallbackOr !== built.primary) {
+      const orHits = await tryMatch(built.fallbackOr);
+      if (orHits && orHits.length > 0) return orHits;
+      if (orHits) return orHits; // empty but FTS worked
+    } else if (primaryHits) {
+      return primaryHits;
     }
   }
 
+  // LIKE fallback: AND all significant tokens, order by earliest match.
+  const tokens = significantTokens(query);
   const likeParts: string[] = [];
   const likeArgs: string[] = [];
-  const firstToken = query.split(/\s+/).filter(Boolean)[0];
-  if (firstToken) {
+  for (const t of tokens) {
     likeParts.push("instr(lower(c.text), lower(?)) > 0");
-    likeArgs.push(firstToken);
+    likeArgs.push(t);
   }
-  // Keywords are already in filter.sql via buildFilterSql
-  if (likeParts.length === 0 && !filter.sql) return [];
+  const kwFilter = buildFilterSql(filters, "c", { includeKeywords: true });
+  if (likeParts.length === 0 && !kwFilter.sql) return [];
 
   const whereExtra = likeParts.length ? ` AND ${likeParts.join(" AND ")}` : "";
+  const orderExpr = tokens[0] != null ? "instr(lower(c.text), lower(?))" : "c.rowid";
+  const orderArgs = tokens[0] != null ? [tokens[0]] : [];
+
   const res = await db.execute({
     sql: `
-      SELECT c.id AS chunk_id, c.document_id, c.source_id, c.text, c.heading, c.section_path,
-             d.uri, d.title
+      SELECT ${HIT_SELECT}
       FROM chunks c
       JOIN documents d ON d.id = c.document_id
-      WHERE 1=1${filter.sql}${whereExtra}
+      WHERE 1=1${kwFilter.sql}${whereExtra}${DOC_OK}
+      ORDER BY ${orderExpr}
       LIMIT ?
     `,
-    args: [...filter.args, ...likeArgs, limit],
+    args: [...kwFilter.args, ...likeArgs, ...orderArgs, limit],
   });
   return res.rows.map((row, i) => rowToHit(row as Record<string, unknown>, 1 / (i + 1)));
 }
 
-function cosine(a: Float32Array, b: Float32Array): number {
-  const n = Math.min(a.length, b.length);
+function cosine(a: Float32Array, b: Float32Array): number | null {
+  if (a.length !== b.length || a.length === 0) return null;
   let dot = 0;
   let na = 0;
   let nb = 0;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < a.length; i++) {
     const x = a[i]!;
     const y = b[i]!;
     dot += x * y;
@@ -162,73 +191,119 @@ function blobToFloat32(blob: unknown, dims: number): Float32Array {
     return new Float32Array(view.buffer.slice(view.byteOffset, view.byteOffset + dims * 4));
   }
   if (typeof blob === "string") {
-    // unlikely
     return new Float32Array(0);
   }
-  // libsql may return Uint8Array / Buffer
   const buf = Buffer.from(blob as Buffer);
   return new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 4));
+}
+
+async function bruteForceVectorSearch(
+  db: Client,
+  queryVec: Float32Array,
+  limit: number,
+  filters: SearchFilters | undefined,
+  modelId: string | null,
+): Promise<SearchHit[]> {
+  const filter = buildFilterSql(filters, "c", { includeKeywords: true });
+  const modelClause = modelId ? " AND e.model_id = ?" : "";
+  const modelArgs = modelId ? [modelId] : [];
+
+  const res = await db.execute({
+    sql: `
+      SELECT ${HIT_SELECT}, e.embedding, e.dims, e.model_id
+      FROM chunk_embeddings e
+      JOIN chunks c ON c.id = e.chunk_id
+      JOIN documents d ON d.id = c.document_id
+      WHERE 1=1${filter.sql}${modelClause}${DOC_OK}
+    `,
+    args: [...filter.args, ...modelArgs],
+  });
+
+  const scored: SearchHit[] = [];
+  for (const row of res.rows) {
+    const dims = Number(row.dims);
+    if (dims !== queryVec.length) continue;
+    const vec = blobToFloat32(row.embedding, dims);
+    if (vec.length !== queryVec.length) continue;
+    const score = cosine(queryVec, vec);
+    if (score == null) continue;
+    const hit = rowToHit(row as Record<string, unknown>, score);
+    if (!hitMatchesFilters(hit, filters)) continue;
+    scored.push(hit);
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit);
 }
 
 async function vectorSearch(
   db: Client,
   queryVec: Float32Array,
   limit: number,
-  filters?: SearchFilters,
+  filters: SearchFilters | undefined,
+  modelId: string | null,
 ): Promise<SearchHit[]> {
-  const filter = buildFilterSql(filters);
-  // Over-fetch when filtering so post-join WHERE does not starve the result set.
-  const candidateLimit = hasSearchFilters(filters) ? Math.max(limit * 5, limit) : limit;
+  const filter = buildFilterSql(filters, "c", { includeKeywords: true });
+  const filtering = hasSearchFilters(filters);
+  const overFetchSteps = filtering ? [5, 10, 20, 40] : [1];
 
-  // Try libSQL vector_top_k first
-  try {
-    const res = await db.execute({
-      sql: `
-        SELECT c.id AS chunk_id, c.document_id, c.source_id, c.text, c.heading, c.section_path,
-               d.uri, d.title, e.dims
-        FROM vector_top_k('chunk_embeddings_idx', vector32(?), ?) AS v
-        JOIN chunk_embeddings e ON e.rowid = v.rowid
-        JOIN chunks c ON c.id = e.chunk_id
-        JOIN documents d ON d.id = c.document_id
-        WHERE 1=1${filter.sql}
-      `,
-      args: [
-        Buffer.from(queryVec.buffer, queryVec.byteOffset, queryVec.byteLength),
-        candidateLimit,
-        ...filter.args,
-      ],
-    });
-    if (res.rows.length > 0) {
-      return res.rows
-        .map((row, i) => rowToHit(row as Record<string, unknown>, 1 / (i + 1)))
-        .filter((hit) => hitMatchesFilters(hit, filters))
-        .slice(0, limit);
+  for (const mult of overFetchSteps) {
+    const candidateLimit = Math.max(limit * mult, limit);
+    try {
+      const res = await db.execute({
+        sql: `
+          SELECT ${HIT_SELECT}, e.dims, e.embedding, e.model_id
+          FROM vector_top_k('chunk_embeddings_idx', vector32(?), ?) AS v
+          JOIN chunk_embeddings e ON e.rowid = v.rowid
+          JOIN chunks c ON c.id = e.chunk_id
+          JOIN documents d ON d.id = c.document_id
+          WHERE 1=1${filter.sql}${DOC_OK}
+        `,
+        args: [
+          Buffer.from(queryVec.buffer, queryVec.byteOffset, queryVec.byteLength),
+          candidateLimit,
+          ...filter.args,
+        ],
+      });
+
+      const scored: SearchHit[] = [];
+      for (const row of res.rows) {
+        if (modelId && String(row.model_id) !== modelId) continue;
+        const dims = Number(row.dims);
+        if (dims !== queryVec.length) continue;
+        const vec = blobToFloat32(row.embedding, dims);
+        const sim = cosine(queryVec, vec);
+        if (sim == null) continue;
+        const hit = rowToHit(row as Record<string, unknown>, sim);
+        if (!hitMatchesFilters(hit, filters)) continue;
+        scored.push(hit);
+      }
+      scored.sort((a, b) => b.score - a.score);
+
+      if (scored.length >= limit || !filtering) {
+        return scored.slice(0, limit);
+      }
+      // ANN returned rows but filters starved the set — escalate over-fetch.
+      if (res.rows.length === 0) break;
+    } catch {
+      break;
     }
-  } catch {
-    // fallback to brute-force cosine
   }
 
-  const res = await db.execute({
-    sql: `
-      SELECT c.id AS chunk_id, c.document_id, c.source_id, c.text, c.heading, c.section_path,
-             d.uri, d.title, e.embedding, e.dims
-      FROM chunk_embeddings e
-      JOIN chunks c ON c.id = e.chunk_id
-      JOIN documents d ON d.id = c.document_id
-      WHERE 1=1${filter.sql}
-    `,
-    args: filter.args,
-  });
+  return bruteForceVectorSearch(db, queryVec, limit, filters, modelId);
+}
 
-  const scored: SearchHit[] = [];
-  for (const row of res.rows) {
-    const dims = Number(row.dims);
-    const vec = blobToFloat32(row.embedding, dims);
-    const score = cosine(queryVec, vec);
-    scored.push(rowToHit(row as Record<string, unknown>, score));
+/** Cap how many chunks from the same document appear in the ranked list. */
+export function diversifyByDocument(hits: SearchHit[], maxPerDocument: number): SearchHit[] {
+  if (maxPerDocument <= 0) return hits;
+  const counts = new Map<string, number>();
+  const out: SearchHit[] = [];
+  for (const hit of hits) {
+    const n = counts.get(hit.documentId) ?? 0;
+    if (n >= maxPerDocument) continue;
+    counts.set(hit.documentId, n + 1);
+    out.push(hit);
   }
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit);
+  return out;
 }
 
 export async function hybridSearch(
@@ -247,7 +322,13 @@ export async function hybridSearch(
   if (embedder) {
     try {
       const queryVec = await embedder.embedOne(query);
-      vectorHits = await vectorSearch(db, queryVec, config.search.vector_limit, filters);
+      vectorHits = await vectorSearch(
+        db,
+        queryVec,
+        config.search.vector_limit,
+        filters,
+        embedder.modelId,
+      );
     } catch (err) {
       log.error(`vector search unavailable (${formatError(err)}); using FTS only`);
       await flushLog();
@@ -262,14 +343,14 @@ export async function hybridSearch(
 
   if (config.rerank.enabled && config.rerank.provider !== "none") {
     try {
-      ranked = await rerankResults(query, ranked, config);
+      ranked = await rerankResults(query, ranked, config, expandHome(config.data_dir));
     } catch (err) {
       log.error(`rerank failed; returning unre-ranked hits: ${formatError(err)}`);
       await flushLog();
-      // Keep hybrid ranking so a bad rerank provider does not blank the query UI.
     }
   }
 
+  ranked = diversifyByDocument(ranked, config.search.max_per_document);
   const out = ranked.slice(0, config.search.top_k);
   log.info(`query done hits=${out.length} (fts=${ftsHits.length} vector=${vectorHits.length})`);
   return out;

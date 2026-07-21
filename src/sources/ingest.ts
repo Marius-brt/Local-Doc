@@ -7,18 +7,23 @@ import type { LocaldocConfig } from "../config/schema.ts";
 import { extractPage } from "../crawl/adapters/index.ts";
 import { type DiscoveryStrategy, discoverUrls } from "../crawl/discover.ts";
 import { fetchText } from "../crawl/fetch.ts";
+import { detectUrlVersion, isSkippableContentType, normalizeUrl } from "../crawl/urls.ts";
 import { nowIso } from "../db/client.ts";
 import {
   deleteChunksForDocument,
+  documentExtractorVersion,
   getDocumentByUri,
   insertChunks,
   insertEmbedding,
+  pruneDocumentsNotIn,
   upsertDocument,
 } from "../db/documents.ts";
 import { type SourceKind, upsertSource } from "../db/sources.ts";
 import { ensureVectorIndex } from "../db/vector-index.ts";
 import { type Embedder, tryCreateEmbedder } from "../embed/index.ts";
-import { isBoilerplateOnly } from "../extract/html.ts";
+import { EXTRACTOR_VERSION, isBoilerplateOnly } from "../extract/html.ts";
+import { normalizeTitle, sanitizeMarkdown } from "../extract/sanitize.ts";
+import { embedTextForChunk } from "../search/embed-text.ts";
 import { pathToUri, resolveFolderPath } from "../util/file-uri.ts";
 import { sha256, shortId } from "../util/hash.ts";
 import { collectFolderFiles } from "./folder.ts";
@@ -73,11 +78,26 @@ async function indexMarkdownDoc(opts: {
   markdown: string;
   recreate: boolean;
   embedder: Embedder | null;
+  meta?: Record<string, unknown>;
 }): Promise<"ok" | "skipped"> {
-  const { db, config, dataDir, sourceId, uri, title, markdown, recreate, embedder } = opts;
+  const { db, config, dataDir, sourceId, recreate, embedder } = opts;
+  let uri = opts.uri;
+  try {
+    if (/^https?:\/\//i.test(uri)) uri = normalizeUrl(uri);
+  } catch {
+    // keep
+  }
+  const title = normalizeTitle(opts.title);
+  const markdown = sanitizeMarkdown(opts.markdown);
   const contentHash = sha256(markdown);
   const existing = await getDocumentByUri(db, sourceId, uri);
-  if (!recreate && existing?.content_hash === contentHash && existing.status === "ok") {
+  const existingVersion = existing ? documentExtractorVersion(existing) : null;
+  if (
+    !recreate &&
+    existing?.content_hash === contentHash &&
+    existing.status === "ok" &&
+    existingVersion === EXTRACTOR_VERSION
+  ) {
     return "skipped";
   }
 
@@ -85,6 +105,13 @@ async function indexMarkdownDoc(opts: {
   await mkdir(extractedDir, { recursive: true });
   const extractedPath = join(extractedDir, `${shortId(uri)}.md`);
   await writeFile(extractedPath, markdown, "utf8");
+
+  const version = detectUrlVersion(uri);
+  const meta: Record<string, unknown> = {
+    extractor_version: EXTRACTOR_VERSION,
+    ...(opts.meta ?? {}),
+  };
+  if (version && meta.version == null) meta.version = version;
 
   const doc = await upsertDocument(db, {
     sourceId,
@@ -94,6 +121,7 @@ async function indexMarkdownDoc(opts: {
     extractedPath,
     status: "ok",
     error: null,
+    meta,
   });
 
   await deleteChunksForDocument(db, doc.id);
@@ -106,15 +134,23 @@ async function indexMarkdownDoc(opts: {
     text: c.text,
     heading: c.heading,
     sectionPath: c.sectionPath,
+    title: title ?? null,
     startOffset: c.startOffset,
     endOffset: c.endOffset,
     contentHash: c.contentHash,
-    meta: { kind: c.kind },
+    meta: {
+      kind: c.kind,
+      ...(c.language ? { language: c.language } : {}),
+    },
   }));
   await insertChunks(db, chunkRows);
 
   if (embedder) {
-    const vectors = await embedder.embed(chunkRows.map((c) => c.text));
+    const vectors = await embedder.embed(
+      chunkRows.map((c) =>
+        embedTextForChunk({ title: c.title, sectionPath: c.sectionPath, text: c.text }),
+      ),
+    );
     const dims = vectors[0]?.length ?? embedder.dims;
     if (dims > 0) {
       await ensureVectorIndex(db, dims);
@@ -124,6 +160,31 @@ async function indexMarkdownDoc(opts: {
     }
   }
   return "ok";
+}
+
+async function markDocumentError(
+  db: Client,
+  sourceId: string,
+  uri: string,
+  message: string,
+): Promise<void> {
+  let normalized = uri;
+  try {
+    if (/^https?:\/\//i.test(uri)) normalized = normalizeUrl(uri);
+  } catch {
+    // keep
+  }
+  const existing = await getDocumentByUri(db, sourceId, normalized);
+  if (existing) {
+    await deleteChunksForDocument(db, existing.id);
+  }
+  await upsertDocument(db, {
+    sourceId,
+    uri: normalized,
+    status: "error",
+    error: message,
+    meta: { extractor_version: EXTRACTOR_VERSION },
+  });
 }
 
 async function fetchPageContent(
@@ -136,6 +197,7 @@ async function fetchPageContent(
   ok: boolean;
   finalUrl: string;
   html: string;
+  contentType: string;
   usedPlaywright: boolean;
   error?: string;
 }> {
@@ -152,6 +214,7 @@ async function fetchPageContent(
       ok: pw.ok,
       finalUrl: pw.url,
       html: pw.body,
+      contentType: "text/html",
       usedPlaywright: true,
       error: pw.error,
     };
@@ -161,8 +224,20 @@ async function fetchPageContent(
   let html = res.body;
   let ok = res.ok;
   let finalUrl = res.url;
+  let contentType = res.contentType ?? "";
   let usedPlaywright = false;
   let error = res.error;
+
+  if (ok && isSkippableContentType(contentType)) {
+    return {
+      ok: false,
+      finalUrl,
+      html: "",
+      contentType,
+      usedPlaywright: false,
+      error: `unsupported content-type: ${contentType}`,
+    };
+  }
 
   const needsBrowser =
     mode === "auto" &&
@@ -187,6 +262,7 @@ async function fetchPageContent(
       html = pw.body;
       ok = true;
       finalUrl = pw.url;
+      contentType = "text/html";
       usedPlaywright = true;
       error = undefined;
     } else if (!ok) {
@@ -194,7 +270,7 @@ async function fetchPageContent(
     }
   }
 
-  return { ok, finalUrl, html, usedPlaywright, error };
+  return { ok, finalUrl, html, contentType, usedPlaywright, error };
 }
 
 export async function ingestWeb(
@@ -230,6 +306,7 @@ export async function ingestWeb(
   let pagesFailed = 0;
   let pagesSkipped = 0;
   const errors: Array<{ uri: string; error: string }> = [];
+  const keepUris = new Set<string>();
 
   progress({
     phase: "fetch",
@@ -253,16 +330,19 @@ export async function ingestWeb(
             if (url.endsWith("llms-full.txt") || url.endsWith("llms.txt")) {
               const res = await fetchText(url, config, options.signal);
               if (!res.ok) throw new Error(res.error ?? "fetch failed");
+              const uri = normalizeUrl(res.url);
+              keepUris.add(uri);
               const result = await indexMarkdownDoc({
                 db,
                 config,
                 dataDir,
                 sourceId: source.id,
-                uri: res.url,
+                uri,
                 title: url.split("/").pop() ?? url,
                 markdown: res.body,
                 recreate: Boolean(options.recreate),
                 embedder,
+                meta: { adapter: "llms-txt" },
               });
               if (result === "skipped") pagesSkipped++;
               else pagesOk++;
@@ -279,20 +359,30 @@ export async function ingestWeb(
             if (!fetched.ok || !fetched.html) {
               throw new Error(fetched.error ?? "empty response");
             }
+            if (isSkippableContentType(fetched.contentType)) {
+              throw new Error(`unsupported content-type: ${fetched.contentType}`);
+            }
             const extracted = extractPage(fetched.html, fetched.finalUrl);
             if (isBoilerplateOnly(extracted.markdown)) {
               throw new Error("boilerplate-only content");
             }
+            const uri = normalizeUrl(fetched.finalUrl);
+            keepUris.add(uri);
             const result = await indexMarkdownDoc({
               db,
               config,
               dataDir,
               sourceId: source.id,
-              uri: fetched.finalUrl,
+              uri,
               title: extracted.title,
               markdown: extracted.markdown,
               recreate: Boolean(options.recreate),
               embedder,
+              meta: {
+                adapter: extracted.adapter,
+                canonical: extracted.canonical ?? undefined,
+                lang: extracted.lang ?? undefined,
+              },
             });
             if (result === "skipped") pagesSkipped++;
             else pagesOk++;
@@ -301,12 +391,7 @@ export async function ingestWeb(
             pagesFailed++;
             const message = err instanceof Error ? err.message : String(err);
             errors.push({ uri: url, error: message });
-            await upsertDocument(db, {
-              sourceId: source.id,
-              uri: url,
-              status: "error",
-              error: message,
-            });
+            await markDocumentError(db, source.id, url, message);
           }
         }),
       ),
@@ -322,6 +407,10 @@ export async function ingestWeb(
       throw err;
     }
     throw err;
+  }
+
+  if (keepUris.size > 0) {
+    await pruneDocumentsNotIn(db, source.id, keepUris);
   }
 
   await upsertSource(db, {
@@ -376,6 +465,7 @@ export async function ingestFolder(
   let pagesSkipped = 0;
   const errors: Array<{ uri: string; error: string }> = [];
 
+  const keepUris = new Set<string>();
   const limit = pLimit(config.crawl.concurrency);
   await Promise.all(
     files.map((file, idx) =>
@@ -389,33 +479,43 @@ export async function ingestFolder(
         });
         try {
           let content = file.content;
+          let title = file.path.split("/").pop() ?? file.path;
+          let adapter = "filesystem";
           if (/\.html?$/i.test(file.path)) {
-            content = extractPage(file.content, file.uri).markdown;
+            const extracted = extractPage(file.content, file.uri);
+            content = extracted.markdown;
+            title = extracted.title || title;
+            adapter = extracted.adapter;
           }
+          keepUris.add(file.uri);
           const result = await indexMarkdownDoc({
             db,
             config,
             dataDir,
             sourceId: source.id,
             uri: file.uri,
-            title: file.path.split("/").pop() ?? file.path,
+            title,
             markdown: content,
             recreate: Boolean(options.recreate),
             embedder,
+            meta: { adapter },
           });
           if (result === "skipped") pagesSkipped++;
           else pagesOk++;
         } catch (err) {
           if (isAbortError(err)) throw err;
           pagesFailed++;
-          errors.push({
-            uri: file.uri,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          const message = err instanceof Error ? err.message : String(err);
+          errors.push({ uri: file.uri, error: message });
+          await markDocumentError(db, source.id, file.uri, message);
         }
       }),
     ),
   );
+
+  if (keepUris.size > 0) {
+    await pruneDocumentsNotIn(db, source.id, keepUris);
+  }
 
   await upsertSource(db, {
     kind: "folder",
@@ -474,6 +574,7 @@ export async function ingestGithub(
   let pagesFailed = 0;
   let pagesSkipped = 0;
   const errors: Array<{ uri: string; error: string }> = [];
+  const keepUris = new Set<string>();
   const limit = pLimit(config.crawl.concurrency);
 
   await Promise.all(
@@ -487,30 +588,44 @@ export async function ingestGithub(
           message: file.path,
         });
         try {
+          let content = file.content;
+          let title = file.path.split("/").pop() ?? file.path;
+          let adapter = "github";
+          if (/\.html?$/i.test(file.path)) {
+            const extracted = extractPage(file.content, file.uri);
+            content = extracted.markdown;
+            title = extracted.title || title;
+            adapter = extracted.adapter;
+          }
+          keepUris.add(file.uri);
           const result = await indexMarkdownDoc({
             db,
             config,
             dataDir,
             sourceId: source.id,
             uri: file.uri,
-            title: file.path.split("/").pop() ?? file.path,
-            markdown: file.content,
+            title,
+            markdown: content,
             recreate: Boolean(options.recreate),
             embedder,
+            meta: { adapter },
           });
           if (result === "skipped") pagesSkipped++;
           else pagesOk++;
         } catch (err) {
           if (isAbortError(err)) throw err;
           pagesFailed++;
-          errors.push({
-            uri: file.uri,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          const message = err instanceof Error ? err.message : String(err);
+          errors.push({ uri: file.uri, error: message });
+          await markDocumentError(db, source.id, file.uri, message);
         }
       }),
     ),
   );
+
+  if (keepUris.size > 0) {
+    await pruneDocumentsNotIn(db, source.id, keepUris);
+  }
 
   await upsertSource(db, {
     kind: "github",

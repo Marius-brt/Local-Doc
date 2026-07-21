@@ -22,13 +22,50 @@ async function recordApplied(client: Client, name: string, sql: string): Promise
 
 /** FTS pieces are IF NOT EXISTS — safe to run on legacy DBs that predate Prisma. */
 async function ensureFts(client: Client): Promise<void> {
+  // Prefer the title-aware FTS schema. If `chunks.title` is missing, fall back
+  // to the legacy 3-column table until the search_quality_fts migration runs.
+  const cols = await client.execute(`PRAGMA table_info(chunks)`);
+  const hasTitle = cols.rows.some((r) => String(r.name) === "title");
+  if (hasTitle) {
+    await client.executeMultiple(`
+CREATE VIRTUAL TABLE IF NOT EXISTS "chunks_fts" USING fts5(
+  text,
+  heading,
+  section_path,
+  title,
+  content='chunks',
+  content_rowid='rowid',
+  tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+  INSERT INTO chunks_fts(rowid, text, heading, section_path, title)
+  VALUES (new.rowid, new.text, new.heading, new.section_path, new.title);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+  INSERT INTO chunks_fts(chunks_fts, rowid, text, heading, section_path, title)
+  VALUES ('delete', old.rowid, old.text, old.heading, old.section_path, old.title);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+  INSERT INTO chunks_fts(chunks_fts, rowid, text, heading, section_path, title)
+  VALUES ('delete', old.rowid, old.text, old.heading, old.section_path, old.title);
+  INSERT INTO chunks_fts(rowid, text, heading, section_path, title)
+  VALUES (new.rowid, new.text, new.heading, new.section_path, new.title);
+END;
+`);
+    return;
+  }
+
   await client.executeMultiple(`
 CREATE VIRTUAL TABLE IF NOT EXISTS "chunks_fts" USING fts5(
   text,
   heading,
   section_path,
   content='chunks',
-  content_rowid='rowid'
+  content_rowid='rowid',
+  tokenize='unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
@@ -49,7 +86,6 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
 END;
 `);
 }
-
 function isAlreadyExistsError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /already exists/i.test(msg);

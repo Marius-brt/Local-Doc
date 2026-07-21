@@ -1,6 +1,6 @@
 import type { Client } from "@libsql/client";
 import { createCliRenderer } from "@opentui/core";
-import { createRoot, useKeyboard, useRenderer } from "@opentui/react";
+import { createRoot, useKeyboard, useRenderer, useSelectionHandler } from "@opentui/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type LoadedConfig, loadConfig } from "../config/load.ts";
 import { getDb } from "../db/client.ts";
@@ -11,8 +11,18 @@ import { buildContextPack, formatPackMarkdown } from "../pack/format.ts";
 import { hybridSearch } from "../search/hybrid.ts";
 import { ingestTarget } from "../sources/ingest.ts";
 import { reembedChunks } from "../sources/reembed.ts";
+import { copyToClipboard } from "../util/clipboard.ts";
+import {
+  classicCopyShortcutLabel,
+  classicQuitShortcutLabel,
+  isClassicCopyShortcut,
+  isQuitCtrlC,
+} from "../util/copy-shortcut.ts";
 import { formatUriForDisplay } from "../util/file-uri.ts";
 import { flushLog, formatError, log } from "../util/log.ts";
+
+const COPY_KEY = classicCopyShortcutLabel();
+const QUIT_KEYS = classicQuitShortcutLabel();
 
 type View = "sources" | "query" | "inspect" | "add";
 
@@ -104,6 +114,8 @@ const COLORS = {
   yellow: "#d29922",
   red: "#f85149",
   selected: "#1f6feb",
+  selectionBg: "#264F78",
+  selectionFg: "#e6edf3",
 };
 
 interface AppState {
@@ -141,8 +153,28 @@ function App() {
   >(null);
   const abortRef = useRef<AbortController | null>(null);
   const queryGenRef = useRef(0);
+  const selectionTextRef = useRef("");
+  const [statusFlash, setStatusFlash] = useState<string | null>(null);
 
   const busy = searching || adding || updating;
+
+  const copySelection = useCallback(async () => {
+    const value = selectionTextRef.current.trimEnd();
+    if (!value) {
+      setStatusFlash("nothing selected");
+      setTimeout(() => setStatusFlash(null), 1200);
+      return false;
+    }
+    const ok = await copyToClipboard(value);
+    setStatusFlash(ok ? "copied to clipboard" : "copy failed");
+    setTimeout(() => setStatusFlash(null), 1500);
+    return ok;
+  }, []);
+
+  // Track selection only — do not auto-copy on mouse release.
+  useSelectionHandler((selection) => {
+    selectionTextRef.current = selection.getSelectedText() ?? "";
+  });
 
   const refresh = useCallback(async () => {
     try {
@@ -437,7 +469,18 @@ function App() {
   );
 
   useKeyboard((key) => {
-    if (key.ctrl && key.name === "c") {
+    // Classic OS copy: Cmd+C on macOS, Ctrl+C on Windows/Linux.
+    if (isClassicCopyShortcut(key)) {
+      const hasSelection = Boolean(selectionTextRef.current.trimEnd());
+      // On non-macOS, Ctrl+C copies when text is selected; otherwise it quits.
+      if (hasSelection || process.platform === "darwin") {
+        void copySelection();
+        return;
+      }
+      quit();
+      return;
+    }
+    if (isQuitCtrlC(key)) {
       quit();
       return;
     }
@@ -776,6 +819,9 @@ function App() {
                     {(updateLog || "Working…").split("\n").map((line, i) => (
                       <box key={`upd-${i}`} width="100%" height={1} flexShrink={0}>
                         <text
+                          selectable
+                          selectionBg={COLORS.selectionBg}
+                          selectionFg={COLORS.selectionFg}
                           fg={
                             updating
                               ? COLORS.yellow
@@ -854,12 +900,21 @@ function App() {
                   <text fg={COLORS.yellow}>Searching… (Esc / Cancel to stop)</text>
                 ) : result ? (
                   result.split("\n").map((line, i) => (
-                    <text key={`line-${String(i)}-${line.slice(0, 8)}`} fg={COLORS.text}>
-                      {line || " "}
-                    </text>
+                    <box key={`line-${i}`} width="100%" height={1} flexShrink={0}>
+                      <text
+                        selectable
+                        selectionBg={COLORS.selectionBg}
+                        selectionFg={COLORS.selectionFg}
+                        fg={COLORS.text}
+                      >
+                        {line || " "}
+                      </text>
+                    </box>
                   ))
                 ) : (
-                  <text fg={COLORS.muted}>Type a query and press Enter. Results appear here.</text>
+                  <text fg={COLORS.muted}>
+                    Type a query and press Enter. Drag to select · {COPY_KEY} to copy.
+                  </text>
                 )}
               </scrollbox>
             </box>
@@ -952,6 +1007,9 @@ function App() {
                   (addLog || "Working…").split("\n").map((line, i) => (
                     <box key={`add-${i}`} width="100%" height={1} flexShrink={0}>
                       <text
+                        selectable
+                        selectionBg={COLORS.selectionBg}
+                        selectionFg={COLORS.selectionFg}
                         fg={
                           adding
                             ? i === 0 || line.startsWith("[")
@@ -980,12 +1038,14 @@ function App() {
       </box>
 
       <box width="100%" height={1} backgroundColor={COLORS.panel} paddingLeft={1}>
-        <text fg={COLORS.muted}>
-          {busy
-            ? "busy · Esc / Cancel to stop · Ctrl+C quit"
-            : `click sidebar · 1–4 views · ↑↓/jk sources · Enter submit · q / Ctrl+C quit · query=${
-                query ? `"${query.slice(0, 40)}"` : "—"
-              }${addTarget && view === "add" ? ` · add="${addTarget.slice(0, 40)}"` : ""}`}
+        <text fg={statusFlash ? COLORS.green : COLORS.muted}>
+          {statusFlash
+            ? statusFlash
+            : busy
+              ? `busy · Esc / Cancel · drag select · ${COPY_KEY} copy`
+              : `click sidebar · 1–4 views · ↑↓/jk · drag select · ${COPY_KEY} copy · ${QUIT_KEYS} quit · query=${
+                  query ? `"${query.slice(0, 40)}"` : "—"
+                }${addTarget && view === "add" ? ` · add="${addTarget.slice(0, 40)}"` : ""}`}
         </text>
       </box>
     </box>
@@ -995,6 +1055,10 @@ function App() {
 export async function startTui(): Promise<void> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
+    useMouse: true,
+    enableMouseMovement: true,
+    // So Cmd (`super`) modifiers reach the app on macOS (needed for Cmd+C copy).
+    useKittyKeyboard: {},
     targetFps: 30,
   });
   createRoot(renderer).render(<App />);

@@ -17,8 +17,8 @@ describe("migrations registry", () => {
 
   test("imported SQL is non-empty", () => {
     for (const m of MIGRATIONS) {
-      expect(m.sql.length).toBeGreaterThan(100);
-      expect(m.sql).toContain("CREATE TABLE");
+      expect(m.sql.length).toBeGreaterThan(50);
+      expect(m.sql).toMatch(/CREATE (TABLE|VIRTUAL TABLE)|ALTER TABLE/i);
     }
   });
 });

@@ -7,7 +7,11 @@
 import initSql from "../../prisma/migrations/20260721120000_init/migration.sql" with {
   type: "text",
 };
+import searchQualityFtsSql from "../../prisma/migrations/20260721210000_search_quality_fts/migration.sql" with {
+  type: "text",
+};
 
 export const MIGRATIONS: Array<{ name: string; sql: string }> = [
   { name: "20260721120000_init", sql: initSql },
+  { name: "20260721210000_search_quality_fts", sql: searchQualityFtsSql },
 ];

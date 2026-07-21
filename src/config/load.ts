@@ -40,11 +40,13 @@ search:
   vector_limit: 40
   top_k: 12
   budget_tokens: 2400
+  max_per_document: 2
 
 chunking:
   chunk_size: 512
   min_characters: 24
   table_rows: 3
+  overlap: 64
 
 crawl:
   max_pages: 500

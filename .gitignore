@@ -27,5 +27,5 @@ prisma/dev.db-journal
 # Rust Model2Vec sidecar
 native/model2vec-cli/target/
 
-*.yml
+*tmp-config.yml
 *.db

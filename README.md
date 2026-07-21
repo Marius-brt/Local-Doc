@@ -16,7 +16,36 @@ MIT licensed. Single-file executables via Bun.
 - Playwright auto-fallback for JS-heavy or blocked pages (downloaded on first use)
 - Resumable ingest with content-hash skip and ingest reports
 
-## Install (dev)
+## Install
+
+### Binary (recommended)
+
+[`install.sh`](install.sh) detects OS/CPU, fetches the latest [GitHub Release](https://github.com/Marius-brt/Local-Doc/releases), and installs to `~/.local/bin/localdoc`.
+
+Requires `curl` plus `jq` or `python3`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Marius-brt/Local-Doc/main/install.sh | bash
+```
+
+Re-run the same command to upgrade. Options:
+
+```bash
+# Pin a release tag
+LOCALDOC_VERSION=v0.1.0 bash install.sh
+
+# Custom install location
+PREFIX=/usr/local/bin bash install.sh
+
+# Alpine / musl (auto-detected; override if needed)
+LOCALDOC_LIBC=musl bash install.sh
+```
+
+Published assets: `localdoc-darwin-arm64`, `localdoc-darwin-x64`, `localdoc-linux-x64`, `localdoc-linux-x64-musl`, `localdoc-windows-x64.exe`.
+
+On Windows, download `localdoc-windows-x64.exe` from [Releases](https://github.com/Marius-brt/Local-Doc/releases) and put it on your `PATH`.
+
+### From source (dev)
 
 ```bash
 bun install

@@ -8,14 +8,19 @@ import { createCtx } from "../context.ts";
 export default defineCommand({
   meta: {
     name: "add",
-    description: "Fetch and index docs from a URL, GitHub repo, or folder",
+    description: "Fetch and index docs from a URL, OpenAPI spec, GitHub repo, or folder",
   },
   args: {
-    target: { type: "positional", description: "URL, github repo, or folder path", required: true },
+    target: {
+      type: "positional",
+      description: "URL, OpenAPI/Swagger URL, github repo, or folder path",
+      required: true,
+    },
     config: { type: "string", description: "Path to config.yml", alias: "c" },
     strategy: {
       type: "string",
-      description: "Force discovery strategy (llms-full.txt|llms.txt|sitemap.xml|nav-crawl)",
+      description:
+        "Force discovery strategy (openapi|llms-full.txt|llms.txt|sitemap.xml|nav-crawl)",
     },
     recreate: {
       type: "boolean",
@@ -35,7 +40,7 @@ export default defineCommand({
       String(args.target),
       {
         recreate: Boolean(args.recreate),
-        strategy: args.strategy as DiscoveryStrategy | undefined,
+        strategy: args.strategy as DiscoveryStrategy | "openapi" | undefined,
         onProgress: (p) => {
           if (p.current && p.total && p.message && !/^Fetching \d+ /.test(p.message)) {
             console.log(`[${p.phase}] ${p.current}/${p.total} ${p.message}`);

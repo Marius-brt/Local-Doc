@@ -6,7 +6,7 @@ import { chunkDocument } from "../chunk/index.ts";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { extractPage } from "../crawl/adapters/index.ts";
 import { type DiscoveryStrategy, discoverUrls } from "../crawl/discover.ts";
-import { fetchText } from "../crawl/fetch.ts";
+import { buildFetchInit, fetchText } from "../crawl/fetch.ts";
 import {
   detectUrlVersion,
   isSkippableContentType,
@@ -27,6 +27,12 @@ import { type SourceKind, upsertSource } from "../db/sources.ts";
 import { ensureVectorIndex, getVectorDims } from "../db/vector-index.ts";
 import { type Embedder, tryCreateEmbedder } from "../embed/index.ts";
 import { EXTRACTOR_VERSION, isBoilerplateOnly } from "../extract/html.ts";
+import {
+  isOpenApiDocument,
+  looksLikeOpenApiUrl,
+  openApiToMarkdown,
+  parseOpenApiText,
+} from "../extract/openapi.ts";
 import { normalizeTitle, sanitizeMarkdown } from "../extract/sanitize.ts";
 import { embedTextForChunk } from "../search/embed-text.ts";
 import { pathToUri, resolveFolderPath } from "../util/file-uri.ts";
@@ -44,7 +50,7 @@ export interface IngestProgress {
 
 export interface IngestOptions {
   recreate?: boolean;
-  strategy?: DiscoveryStrategy;
+  strategy?: DiscoveryStrategy | "openapi";
   onProgress?: (p: IngestProgress) => void;
   signal?: AbortSignal;
 }
@@ -408,7 +414,9 @@ export async function ingestWeb(
   });
 
   progress({ phase: "discover", message: "Discovering URLs…" });
-  const discovery = await discoverUrls(rootUrl, config, options.strategy, options.signal);
+  const webStrategy =
+    options.strategy && options.strategy !== "openapi" ? options.strategy : undefined;
+  const discovery = await discoverUrls(rootUrl, config, webStrategy, options.signal);
   throwIfAborted(options.signal);
   log.info(`discover strategy=${discovery.strategy} urls=${discovery.urls.length} root=${rootUrl}`);
   await upsertSource(db, {
@@ -800,13 +808,151 @@ export async function ingestTarget(
     return ingestGithub(db, config, dataDir, target, options);
   }
   if (/^https?:\/\//i.test(target)) {
+    if (options.strategy === "openapi" || looksLikeOpenApiUrl(target)) {
+      return ingestOpenApi(db, config, dataDir, target, options);
+    }
     return ingestWeb(db, config, dataDir, target, options);
   }
   // folder (path or file:// URI from stored root_uri on update)
   const abs = resolveFolderPath(target);
   const st = await stat(abs);
   if (!st.isDirectory()) {
-    throw new Error(`Not a directory, URL, or GitHub repo: ${target}`);
+    throw new Error(`Not a directory, URL, GitHub repo, or OpenAPI URL: ${target}`);
   }
   return ingestFolder(db, config, dataDir, abs, options);
+}
+
+/**
+ * Fetch an OpenAPI / Swagger spec URL, convert to markdown, and index as one document.
+ */
+export async function ingestOpenApi(
+  db: Client,
+  config: LocaldocConfig,
+  dataDir: string,
+  specUrl: string,
+  options: IngestOptions = {},
+): Promise<IngestReport> {
+  const startedAt = nowIso();
+  const progress = options.onProgress ?? (() => {});
+  const embedder = await tryCreateEmbedder(config, dataDir);
+  const rootUrl = normalizeUrl(specUrl);
+
+  const source = await upsertSource(db, {
+    kind: "web",
+    rootUri: rootUrl,
+    title: rootUrl,
+    strategy: "openapi",
+    status: "indexing",
+  });
+
+  progress({ phase: "fetch", message: `Fetching OpenAPI spec ${rootUrl}` });
+  log.info(`openapi fetch ${rootUrl}`);
+
+  let pagesOk = 0;
+  let pagesFailed = 0;
+  let pagesSkipped = 0;
+  const errors: Array<{ uri: string; error: string }> = [];
+  const keepUris = new Set<string>();
+
+  try {
+    throwIfAborted(options.signal);
+    const init = buildFetchInit(config, {
+      url: rootUrl,
+      signal: options.signal,
+      headers: {
+        Accept:
+          "application/json, application/yaml, text/yaml, application/x-yaml, text/plain, */*;q=0.8",
+      },
+    });
+    const res = await fetch(rootUrl, init);
+    const body = await res.text();
+    const finalUrl = normalizeUrl(res.url || rootUrl);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    if (!body.trim()) {
+      throw new Error("empty OpenAPI response");
+    }
+
+    progress({ phase: "parse", message: "Parsing OpenAPI document…" });
+    let parsed: unknown;
+    try {
+      parsed = parseOpenApiText(body);
+    } catch (err) {
+      throw new Error(
+        `Failed to parse OpenAPI JSON/YAML: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!isOpenApiDocument(parsed)) {
+      throw new Error(
+        "URL did not return an OpenAPI/Swagger document (missing openapi/swagger/paths+info)",
+      );
+    }
+
+    const { title, markdown, version } = openApiToMarkdown(parsed);
+    progress({ phase: "index", message: `Indexing ${title}${version ? ` ${version}` : ""}` });
+    await prepareVectorIndex(db, dataDir, embedder, options.signal);
+
+    keepUris.add(finalUrl);
+    const result = await indexMarkdownDoc({
+      db,
+      config,
+      dataDir,
+      sourceId: source.id,
+      uri: finalUrl,
+      title,
+      markdown,
+      recreate: Boolean(options.recreate),
+      embedder,
+      meta: {
+        adapter: "openapi",
+        openapi_version: parsed.openapi ?? parsed.swagger ?? null,
+        api_version: version,
+      },
+      onProgress: progress,
+    });
+    if (result === "skipped") pagesSkipped++;
+    else pagesOk++;
+  } catch (err) {
+    if (isAbortError(err)) {
+      await upsertSource(db, {
+        kind: "web",
+        rootUri: rootUrl,
+        strategy: "openapi",
+        status: "error",
+      });
+      throw err;
+    }
+    pagesFailed++;
+    const message = err instanceof Error ? err.message : String(err);
+    errors.push({ uri: rootUrl, error: message });
+    log.warn(`openapi ingest failed uri=${rootUrl} error=${message}`);
+    await markDocumentError(db, source.id, rootUrl, message);
+  }
+
+  if (keepUris.size > 0) {
+    await pruneDocumentsNotIn(db, source.id, keepUris);
+  }
+
+  await upsertSource(db, {
+    kind: "web",
+    rootUri: rootUrl,
+    strategy: "openapi",
+    status: pagesFailed > 0 && pagesOk === 0 ? "error" : "ready",
+  });
+
+  const report: IngestReport = {
+    sourceId: source.id,
+    rootUri: rootUrl,
+    kind: "web",
+    strategy: "openapi",
+    pagesOk,
+    pagesFailed,
+    pagesSkipped,
+    errors,
+    startedAt,
+    finishedAt: nowIso(),
+  };
+  logIngestSummary(report);
+  return report;
 }

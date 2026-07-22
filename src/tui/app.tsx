@@ -964,7 +964,7 @@ function App() {
                   height={3}
                   border
                   borderColor={inputFocused ? COLORS.accent : COLORS.border}
-                  title={busy ? "Add (busy)" : "URL · GitHub · folder"}
+                  title={busy ? "Add (busy)" : "URL · OpenAPI · GitHub · folder"}
                   titleColor={busy ? COLORS.muted : COLORS.accent}
                 >
                   <input

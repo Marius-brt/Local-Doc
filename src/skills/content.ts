@@ -27,6 +27,7 @@ Compress documentation context so coding agents spend tokens on code, not on rer
 
 \`\`\`bash
 localdoc add https://docs.example.com
+localdoc add https://api.example.com/openapi.json
 localdoc add https://github.com/owner/repo
 localdoc add ./docs
 localdoc update

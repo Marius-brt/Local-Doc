@@ -64,6 +64,8 @@ export const ConfigSchema = z.object({
         model: z.string().default("minishlab/potion-base-8M"),
         /** Texts per embedding API / sidecar call. */
         batch_size: z.number().int().positive().default(20),
+        /** Max embedding requests in flight at once (network providers). */
+        max_parallel: z.number().int().positive().default(4),
         /** OpenAI-compatible API base (used when provider is openai). */
         base_url: z.string().nullable().default(null),
         /** `$ENV_NAME` or literal; optional for local openai-compatible servers. */
@@ -73,6 +75,7 @@ export const ConfigSchema = z.object({
         provider: "model2vec",
         model: "minishlab/potion-base-8M",
         batch_size: 20,
+        max_parallel: 4,
         base_url: null,
         api_key: null,
       }),

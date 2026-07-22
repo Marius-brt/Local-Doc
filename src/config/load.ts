@@ -16,6 +16,7 @@ embeddings:
   provider: model2vec
   model: minishlab/potion-base-8M
   batch_size: 20
+  max_parallel: 4    # embedding requests in flight at once (network providers)
   base_url: null
   api_key: null
   # provider: openai

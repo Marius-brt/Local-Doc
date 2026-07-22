@@ -53,7 +53,11 @@ export async function reembedChunks(
 ): Promise<ReembedReport> {
   const startedAt = nowIso();
   const progress = options.onProgress ?? (() => {});
-  const batchSize = Math.max(1, options.batchSize ?? config.embeddings.batch_size ?? 20);
+  const requestSize = Math.max(1, config.embeddings.batch_size ?? 20);
+  const maxParallel = Math.max(1, config.embeddings.max_parallel ?? 4);
+  // Hand the embedder a window that keeps every parallel request lane busy; it
+  // splits the window into `requestSize` chunks and runs `maxParallel` at once.
+  const windowSize = Math.max(1, options.batchSize ?? requestSize * maxParallel);
 
   progress({ phase: "embedder", message: "Loading embedding model…" });
   await yieldToUi();
@@ -145,24 +149,24 @@ export async function reembedChunks(
   }
 
   let embedded = 0;
-  const totalBatches = Math.ceil(chunks.length / batchSize);
+  const totalWindows = Math.ceil(chunks.length / windowSize);
 
-  for (let i = 0; i < chunks.length; i += batchSize) {
+  for (let i = 0; i < chunks.length; i += windowSize) {
     throwIfAborted(options.signal);
     await yieldToUi();
 
-    const batch = chunks.slice(i, i + batchSize);
-    const batchIndex = Math.floor(i / batchSize) + 1;
+    const window = chunks.slice(i, i + windowSize);
+    const windowIndex = Math.floor(i / windowSize) + 1;
     progress({
       phase: "embed",
       current: embedded,
       total: chunks.length,
-      message: `${embedder.modelId} · ${dims}-d · batch ${batchIndex}/${totalBatches} starting (${batch.length} texts)`,
+      message: `${embedder.modelId} · ${dims}-d · batch ${windowIndex}/${totalWindows} starting (${window.length} texts)`,
     });
 
     const t0 = Date.now();
     const vectors = await embedder.embed(
-      batch.map((c) =>
+      window.map((c) =>
         embedTextForChunk({ title: c.title, sectionPath: c.sectionPath, text: c.text }),
       ),
       options.signal,
@@ -170,16 +174,16 @@ export async function reembedChunks(
     throwIfAborted(options.signal);
     const elapsedMs = Date.now() - t0;
 
-    for (let j = 0; j < batch.length; j++) {
+    for (let j = 0; j < window.length; j++) {
       throwIfAborted(options.signal);
       const vec = vectors[j];
       if (!vec) continue;
       if (vec.length !== dims) {
         throw new Error(
-          `Embedding dim mismatch: expected ${dims}, got ${vec.length} for chunk ${batch[j]!.id}`,
+          `Embedding dim mismatch: expected ${dims}, got ${vec.length} for chunk ${window[j]!.id}`,
         );
       }
-      await insertEmbedding(db, batch[j]!.id, embedder.modelId, vec);
+      await insertEmbedding(db, window[j]!.id, embedder.modelId, vec);
       embedded++;
       // Periodic yield during large write bursts
       if (j > 0 && j % 5 === 0) {
@@ -192,7 +196,7 @@ export async function reembedChunks(
       phase: "embed",
       current: embedded,
       total: chunks.length,
-      message: `${embedder.modelId} · ${dims}-d · batch ${batchIndex}/${totalBatches} done in ${elapsedMs}ms`,
+      message: `${embedder.modelId} · ${dims}-d · batch ${windowIndex}/${totalWindows} done in ${elapsedMs}ms`,
     });
   }
 

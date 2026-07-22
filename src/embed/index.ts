@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { embed as aiEmbed, embedMany } from "ai";
+import pLimit from "p-limit";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { resolveApiKey } from "../util/api-key.ts";
 import { formatError, log } from "../util/log.ts";
@@ -232,14 +233,16 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
     async embed(texts: string[], signal?: AbortSignal) {
       throwIfEmbedAborted(signal);
       if (texts.length === 0) return [];
-      const out: Float32Array[] = [];
       const batchSize = Math.max(1, config.embeddings.batch_size ?? 20);
+      const maxParallel = Math.max(1, config.embeddings.max_parallel ?? 4);
       const timeoutMs = embedTimeoutMs(config);
+      const out = new Array<Float32Array>(texts.length);
       const totalBatches = Math.ceil(texts.length / batchSize);
-      for (let i = 0; i < texts.length; i += batchSize) {
+      const limit = pLimit(maxParallel);
+
+      const runBatch = async (start: number, batchIndex: number): Promise<void> => {
         throwIfEmbedAborted(signal);
-        const batch = texts.slice(i, i + batchSize);
-        const batchIndex = Math.floor(i / batchSize) + 1;
+        const batch = texts.slice(start, start + batchSize);
         const abortSignal = mergeEmbedSignal(signal, timeoutMs);
         log.info(
           `openai embed batch ${batchIndex}/${totalBatches} size=${batch.length} model=${modelId} base_url=${baseURL}`,
@@ -253,16 +256,17 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
               abortSignal,
             });
             dims = embedding.length;
-            out.push(Float32Array.from(embedding));
+            out[start] = Float32Array.from(embedding);
           } else {
             const { embeddings } = await embedMany({
               model,
               values: batch,
               abortSignal,
             });
-            for (const embedding of embeddings) {
+            for (let j = 0; j < embeddings.length; j++) {
+              const embedding = embeddings[j]!;
               dims = embedding.length;
-              out.push(Float32Array.from(embedding));
+              out[start + j] = Float32Array.from(embedding);
             }
           }
           log.info(
@@ -280,7 +284,17 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
           log.error(msg);
           throw new Error(msg, { cause: err });
         }
+      };
+
+      const tasks: Promise<void>[] = [];
+      let batchIndex = 0;
+      for (let i = 0; i < texts.length; i += batchSize) {
+        batchIndex++;
+        const start = i;
+        const index = batchIndex;
+        tasks.push(limit(() => runBatch(start, index)));
       }
+      await Promise.all(tasks);
       return out;
     },
     async embedOne(text: string, signal?: AbortSignal) {

@@ -9,6 +9,7 @@ MIT licensed. Single-file executables via Bun.
 ## Features
 
 - Smart web crawl: `llms-full.txt` → `llms.txt` → sitemap → nav crawl
+- OpenAPI / Swagger URLs (`openapi.json`, `swagger.yaml`, `/v3/api-docs`, or `--strategy openapi`) converted to searchable markdown
 - Site adapters (Mintlify, GitBook, Docusaurus, ReadMe, Sphinx) + boilerplate stripping
 - Hybrid multilingual search: FTS5 (BM25, unicode61) + vectors, fused with RRF; optional Cohere / llama.cpp (`openai`) / local rerank
 - Default local embeddings via embedded Model2Vec Rust sidecar (`minishlab/potion-base-8M`); Transformers.js bundled for local rerank; OpenAI-compatible embeddings optional
@@ -196,6 +197,8 @@ Changing `embeddings.model` (or provider) after you already indexed may require 
 
 ```bash
 localdoc add https://docs.example.com
+localdoc add https://api.example.com/openapi.json
+localdoc add https://api.example.com/v3/api-docs --strategy openapi
 localdoc add https://github.com/owner/repo
 localdoc add ./docs
 localdoc update [source]

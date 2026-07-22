@@ -55,6 +55,18 @@ function parseLlmsTxt(text: string, base: string): string[] {
   return [...new Set(urls)];
 }
 
+/** Companion index / agent files — never crawl these when strategy is llms-full.txt. */
+const LLMS_FULL_COMPANION_RE = /\/(llms|llm|agent|agents)\.txt$/i;
+
+function isLlmsFullCompanionUrl(url: string): boolean {
+  try {
+    const path = new URL(url).pathname;
+    return LLMS_FULL_COMPANION_RE.test(path);
+  } catch {
+    return LLMS_FULL_COMPANION_RE.test(url);
+  }
+}
+
 async function discoverLlmsFull(
   root: string,
   config: LocaldocConfig,
@@ -62,15 +74,10 @@ async function discoverLlmsFull(
 ): Promise<string[] | null> {
   const origin = originOf(root);
   const scope = { mode: "same-origin" as const, root };
+  // llms-full.txt is the single concatenated dump — index that file only.
   for (const path of ["/llms-full.txt", "/docs/llms-full.txt"]) {
     const body = await fetchOptional(origin + path, config, signal, scope);
     if (!body) continue;
-    // llms-full is often one giant markdown doc — treat as single page
-    if (body.length > 500 && !body.includes("http")) {
-      return [origin + path];
-    }
-    const urls = parseLlmsTxt(body, origin);
-    if (urls.length > 0) return urls.slice(0, config.crawl.max_pages);
     return [origin + path];
   }
   return null;
@@ -273,6 +280,9 @@ export async function discoverUrls(
       let filtered = robots ? urls.filter((u) => robots.isAllowed(u)) : urls;
       filtered = filterUrlsForRoot(filtered, root);
       filtered = dedupeVersionedUrls(filtered);
+      if (strategy === "llms-full.txt") {
+        filtered = filtered.filter((u) => !isLlmsFullCompanionUrl(u));
+      }
       if (filtered.length > 0) {
         return { strategy, urls: filtered.slice(0, config.crawl.max_pages) };
       }

@@ -141,23 +141,26 @@ export async function reembedChunks(
     });
   } else {
     // Full wipe + schema/index rebuild (required when dims change; safest for full re-embed).
-    await rebuildVectorTable(db, dims, { preserveMatchingRows: false });
+    await rebuildVectorTable(db, dims, { preserveMatchingRows: false, dataDir });
   }
 
   let embedded = 0;
+  const totalBatches = Math.ceil(chunks.length / batchSize);
 
   for (let i = 0; i < chunks.length; i += batchSize) {
     throwIfAborted(options.signal);
     await yieldToUi();
 
     const batch = chunks.slice(i, i + batchSize);
+    const batchIndex = Math.floor(i / batchSize) + 1;
     progress({
       phase: "embed",
-      current: Math.min(i + batch.length, chunks.length),
+      current: embedded,
       total: chunks.length,
-      message: `${embedder.modelId} · ${dims}-d`,
+      message: `${embedder.modelId} · ${dims}-d · batch ${batchIndex}/${totalBatches} starting (${batch.length} texts)`,
     });
 
+    const t0 = Date.now();
     const vectors = await embedder.embed(
       batch.map((c) =>
         embedTextForChunk({ title: c.title, sectionPath: c.sectionPath, text: c.text }),
@@ -165,6 +168,7 @@ export async function reembedChunks(
       options.signal,
     );
     throwIfAborted(options.signal);
+    const elapsedMs = Date.now() - t0;
 
     for (let j = 0; j < batch.length; j++) {
       throwIfAborted(options.signal);
@@ -183,6 +187,13 @@ export async function reembedChunks(
         throwIfAborted(options.signal);
       }
     }
+
+    progress({
+      phase: "embed",
+      current: embedded,
+      total: chunks.length,
+      message: `${embedder.modelId} · ${dims}-d · batch ${batchIndex}/${totalBatches} done in ${elapsedMs}ms`,
+    });
   }
 
   progress({

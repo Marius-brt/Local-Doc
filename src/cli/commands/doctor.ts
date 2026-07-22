@@ -71,11 +71,6 @@ export default defineCommand({
         join(loaded.dataDir, "extracted"),
       ],
       [
-        "last ingest report",
-        await exists(join(loaded.dataDir, "last-ingest-report.json")),
-        join(loaded.dataDir, "last-ingest-report.json"),
-      ],
-      [
         "embeddings coverage",
         embeddingsComplete,
         embeddingsComplete

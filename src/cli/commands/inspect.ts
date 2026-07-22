@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import chalk from "chalk";
 import { defineCommand } from "citty";
@@ -6,6 +5,7 @@ import { getDb } from "../../db/client.ts";
 import { countStats } from "../../db/documents.ts";
 import { listSources } from "../../db/sources.ts";
 import { formatUriForDisplay } from "../../util/file-uri.ts";
+import { getLogPath } from "../../util/log.ts";
 import { createCtx } from "../context.ts";
 
 export default defineCommand({
@@ -18,6 +18,7 @@ export default defineCommand({
     const db = await getDb(ctx.loaded.dataDir);
     const stats = await countStats(db);
     const sources = await listSources(db);
+    const logPath = getLogPath();
 
     console.log(chalk.bold("localdoc inspect"));
     console.log(`Data dir: ${ctx.loaded.dataDir}`);
@@ -27,6 +28,7 @@ export default defineCommand({
     );
     console.log(`Extracted: ${join(ctx.loaded.dataDir, "extracted")}`);
     console.log(`Models: ${join(ctx.loaded.dataDir, "models")}`);
+    if (logPath) console.log(`Log: ${logPath}`);
 
     if (sources.length) {
       console.log("");
@@ -34,26 +36,6 @@ export default defineCommand({
       for (const s of sources) {
         console.log(`  ${s.id}  ${s.kind}  ${s.status}  ${formatUriForDisplay(s.root_uri)}`);
       }
-    }
-
-    const reportPath = join(ctx.loaded.dataDir, "last-ingest-report.json");
-    try {
-      const raw = await readFile(reportPath, "utf8");
-      const report = JSON.parse(raw) as {
-        pagesOk: number;
-        pagesFailed: number;
-        pagesSkipped: number;
-        strategy?: string;
-        rootUri: string;
-      };
-      console.log("");
-      console.log(chalk.bold("Last ingest"));
-      console.log(
-        `  ${report.rootUri}  ok=${report.pagesOk} skipped=${report.pagesSkipped} failed=${report.pagesFailed}` +
-          (report.strategy ? ` strategy=${report.strategy}` : ""),
-      );
-    } catch {
-      // none
     }
   },
 });

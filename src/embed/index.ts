@@ -199,6 +199,16 @@ function resolveOpenAIEmbeddingsApiKey(config: LocaldocConfig): string {
   return "localdoc";
 }
 
+function embedTimeoutMs(config: LocaldocConfig): number {
+  return Math.max(60_000, config.crawl.timeout_ms ?? 30_000);
+}
+
+function mergeEmbedSignal(user: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  if (!user) return timeout;
+  return AbortSignal.any([user, timeout]);
+}
+
 function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
   const modelId = config.embeddings.model || "text-embedding-3-small";
   const rawBase = config.embeddings.base_url?.trim() || "https://api.openai.com/v1";
@@ -224,15 +234,23 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
       if (texts.length === 0) return [];
       const out: Float32Array[] = [];
       const batchSize = Math.max(1, config.embeddings.batch_size ?? 20);
+      const timeoutMs = embedTimeoutMs(config);
+      const totalBatches = Math.ceil(texts.length / batchSize);
       for (let i = 0; i < texts.length; i += batchSize) {
         throwIfEmbedAborted(signal);
         const batch = texts.slice(i, i + batchSize);
+        const batchIndex = Math.floor(i / batchSize) + 1;
+        const abortSignal = mergeEmbedSignal(signal, timeoutMs);
+        log.info(
+          `openai embed batch ${batchIndex}/${totalBatches} size=${batch.length} model=${modelId} base_url=${baseURL}`,
+        );
+        const t0 = Date.now();
         try {
           if (batch.length === 1) {
             const { embedding } = await aiEmbed({
               model,
               value: batch[0]!,
-              abortSignal: signal,
+              abortSignal,
             });
             dims = embedding.length;
             out.push(Float32Array.from(embedding));
@@ -240,17 +258,25 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
             const { embeddings } = await embedMany({
               model,
               values: batch,
-              abortSignal: signal,
+              abortSignal,
             });
             for (const embedding of embeddings) {
               dims = embedding.length;
               out.push(Float32Array.from(embedding));
             }
           }
+          log.info(
+            `openai embed batch ${batchIndex}/${totalBatches} done ms=${Date.now() - t0} dims=${dims}`,
+          );
         } catch (err) {
           throwIfEmbedAborted(signal);
           const detail = formatError(err);
-          const msg = `OpenAI embeddings failed (model=${modelId} base_url=${baseURL}): ${detail}`;
+          const timedOut =
+            err instanceof Error &&
+            (err.name === "TimeoutError" || /aborted|timeout/i.test(err.message));
+          const msg = timedOut
+            ? `OpenAI embeddings timed out after ${timeoutMs}ms (model=${modelId} base_url=${baseURL} batch=${batchIndex}/${totalBatches}): ${detail}`
+            : `OpenAI embeddings failed (model=${modelId} base_url=${baseURL} batch=${batchIndex}/${totalBatches}): ${detail}`;
           log.error(msg);
           throw new Error(msg, { cause: err });
         }

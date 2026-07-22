@@ -24,13 +24,14 @@ import {
   upsertDocument,
 } from "../db/documents.ts";
 import { type SourceKind, upsertSource } from "../db/sources.ts";
-import { ensureVectorIndex } from "../db/vector-index.ts";
+import { ensureVectorIndex, getVectorDims } from "../db/vector-index.ts";
 import { type Embedder, tryCreateEmbedder } from "../embed/index.ts";
 import { EXTRACTOR_VERSION, isBoilerplateOnly } from "../extract/html.ts";
 import { normalizeTitle, sanitizeMarkdown } from "../extract/sanitize.ts";
 import { embedTextForChunk } from "../search/embed-text.ts";
 import { pathToUri, resolveFolderPath } from "../util/file-uri.ts";
 import { sha256, shortId } from "../util/hash.ts";
+import { log } from "../util/log.ts";
 import { collectFolderFiles } from "./folder.ts";
 import { collectGithubFiles, collectGithubViaApi, isGithubInput } from "./github.ts";
 
@@ -73,6 +74,45 @@ export interface IngestReport {
   finishedAt: string;
 }
 
+function logIngestSummary(report: IngestReport): void {
+  const errPreview =
+    report.errors.length > 0
+      ? ` errors=[${report.errors
+          .slice(0, 5)
+          .map((e) => `${e.uri}: ${e.error}`)
+          .join("; ")}${report.errors.length > 5 ? "; …" : ""}]`
+      : "";
+  log.info(
+    `ingest done kind=${report.kind} root=${report.rootUri}` +
+      (report.strategy ? ` strategy=${report.strategy}` : "") +
+      ` ok=${report.pagesOk} skipped=${report.pagesSkipped} failed=${report.pagesFailed}` +
+      ` started=${report.startedAt} finished=${report.finishedAt}${errPreview}`,
+  );
+}
+
+/** Probe embedder dims and ensure vector schema once per ingest job. */
+async function prepareVectorIndex(
+  db: Client,
+  dataDir: string,
+  embedder: Embedder | null,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!embedder) return;
+  throwIfAborted(signal);
+  const existing = await getVectorDims(db);
+  if (existing != null && existing > 0 && embedder.dims > 0 && embedder.dims === existing) {
+    await ensureVectorIndex(db, existing, { dataDir });
+    return;
+  }
+  // Probe live dims when unknown or possibly changed.
+  const [probe] = await embedder.embed(["dimension probe"], signal);
+  const dims = probe?.length ?? embedder.dims;
+  if (dims > 0) {
+    log.info(`preparing vector index (${dims}-d) before parallel ingest`);
+    await ensureVectorIndex(db, dims, { dataDir });
+  }
+}
+
 async function indexMarkdownDoc(opts: {
   db: Client;
   config: LocaldocConfig;
@@ -84,6 +124,7 @@ async function indexMarkdownDoc(opts: {
   recreate: boolean;
   embedder: Embedder | null;
   meta?: Record<string, unknown>;
+  onProgress?: (p: IngestProgress) => void;
 }): Promise<"ok" | "skipped"> {
   const { db, config, dataDir, sourceId, recreate, embedder } = opts;
   let uri = opts.uri;
@@ -150,16 +191,22 @@ async function indexMarkdownDoc(opts: {
   }));
   await insertChunks(db, chunkRows);
 
-  if (embedder) {
+  if (embedder && chunkRows.length > 0) {
+    opts.onProgress?.({
+      phase: "embed",
+      total: chunkRows.length,
+      message: `Embedding ${chunkRows.length} chunks · ${uri}`,
+    });
+    log.info(`embed start uri=${uri} chunks=${chunkRows.length} model=${embedder.modelId}`);
+    const t0 = Date.now();
     const vectors = await embedder.embed(
       chunkRows.map((c) =>
         embedTextForChunk({ title: c.title, sectionPath: c.sectionPath, text: c.text }),
       ),
     );
-    const dims = vectors[0]?.length ?? embedder.dims;
-    if (dims > 0) {
-      await ensureVectorIndex(db, dims);
-    }
+    log.info(
+      `embed done uri=${uri} chunks=${chunkRows.length} ms=${Date.now() - t0} model=${embedder.modelId}`,
+    );
     for (let i = 0; i < chunkRows.length; i++) {
       await insertEmbedding(db, chunkRows[i]!.id, embedder.modelId, vectors[i]!);
     }
@@ -192,6 +239,36 @@ async function markDocumentError(
   });
 }
 
+type PlaywrightFallbackReason =
+  | "mode=always"
+  | "http_failed"
+  | "empty_body"
+  | "cloudflare_challenge"
+  | "boilerplate_only"
+  | "extract_failed";
+
+function playwrightFallbackReason(
+  mode: string,
+  ok: boolean,
+  html: string,
+  finalUrl: string,
+): PlaywrightFallbackReason | null {
+  if (mode === "always") return "mode=always";
+  if (mode !== "auto") return null;
+  if (!ok) return "http_failed";
+  if (!html.trim()) return "empty_body";
+  if (html.includes("cf-browser-verification") || html.includes("Just a moment...")) {
+    return "cloudflare_challenge";
+  }
+  try {
+    const page = extractPage(html, finalUrl);
+    if (isBoilerplateOnly(page.markdown)) return "boilerplate_only";
+  } catch {
+    return "extract_failed";
+  }
+  return null;
+}
+
 async function fetchPageContent(
   url: string,
   rootUrl: string,
@@ -215,8 +292,15 @@ async function fetchPageContent(
   const pageScope = { mode: "under-root" as const, root: rootUrl };
 
   if (mode === "always") {
+    const reason: PlaywrightFallbackReason = "mode=always";
+    const msg = `Playwright fallback (${reason}): ${url}`;
+    log.warn(msg);
+    console.error(`[localdoc] ${msg}`);
+    browserProgress?.(msg);
     const { fetchWithPlaywright } = await import("../playwright/browser.ts");
     const pw = await fetchWithPlaywright(url, config, dataDir, browserProgress, rootUrl);
+    if (pw.ok) log.info(`Playwright ok: ${url}`);
+    else log.warn(`Playwright failed: ${url} — ${pw.error ?? "unknown"}`);
     return {
       ok: pw.ok,
       finalUrl: pw.url,
@@ -246,23 +330,18 @@ async function fetchPageContent(
     };
   }
 
-  const needsBrowser =
-    mode === "auto" &&
-    (!ok ||
-      !html.trim() ||
-      html.includes("cf-browser-verification") ||
-      html.includes("Just a moment...") ||
-      (() => {
-        try {
-          const page = extractPage(html, finalUrl);
-          return isBoilerplateOnly(page.markdown);
-        } catch {
-          return true;
-        }
-      })());
+  const reason = playwrightFallbackReason(mode, ok, html, finalUrl);
+  const needsBrowser = reason != null;
 
-  if (needsBrowser) {
+  if (needsBrowser && reason) {
     throwIfAborted(signal);
+    const msg =
+      reason === "http_failed"
+        ? `Playwright fallback (${reason}): ${url} — ${error ?? "fetch failed"}`
+        : `Playwright fallback (${reason}): ${url}`;
+    log.warn(msg);
+    console.error(`[localdoc] ${msg}`);
+    browserProgress?.(msg);
     const { fetchWithPlaywright } = await import("../playwright/browser.ts");
     const pw = await fetchWithPlaywright(url, config, dataDir, browserProgress, rootUrl);
     if (pw.ok && pw.body) {
@@ -272,8 +351,12 @@ async function fetchPageContent(
       contentType = "text/html";
       usedPlaywright = true;
       error = undefined;
-    } else if (!ok) {
-      error = pw.error ?? error;
+      log.info(`Playwright ok after ${reason}: ${url}`);
+    } else {
+      log.warn(`Playwright failed after ${reason}: ${url} — ${pw.error ?? "unknown"}`);
+      if (!ok) {
+        error = pw.error ?? error;
+      }
     }
   }
 
@@ -327,12 +410,15 @@ export async function ingestWeb(
   progress({ phase: "discover", message: "Discovering URLs…" });
   const discovery = await discoverUrls(rootUrl, config, options.strategy, options.signal);
   throwIfAborted(options.signal);
+  log.info(`discover strategy=${discovery.strategy} urls=${discovery.urls.length} root=${rootUrl}`);
   await upsertSource(db, {
     kind: "web",
     rootUri: rootUrl,
     strategy: discovery.strategy,
     status: "indexing",
   });
+
+  await prepareVectorIndex(db, dataDir, embedder, options.signal);
 
   const limit = pLimit(config.crawl.concurrency);
   let pagesOk = 0;
@@ -382,6 +468,7 @@ export async function ingestWeb(
                 recreate: Boolean(options.recreate),
                 embedder,
                 meta: { adapter: "llms-txt" },
+                onProgress: progress,
               });
               if (result === "skipped") pagesSkipped++;
               else pagesOk++;
@@ -426,6 +513,7 @@ export async function ingestWeb(
                 canonical: extracted.canonical ?? undefined,
                 lang: extracted.lang ?? undefined,
               },
+              onProgress: progress,
             });
             if (result === "skipped") pagesSkipped++;
             else pagesOk++;
@@ -434,6 +522,7 @@ export async function ingestWeb(
             pagesFailed++;
             const message = err instanceof Error ? err.message : String(err);
             errors.push({ uri: url, error: message });
+            log.warn(`ingest page failed uri=${url} error=${message}`);
             await markDocumentError(db, source.id, url, message);
           }
         }),
@@ -476,7 +565,7 @@ export async function ingestWeb(
     startedAt,
     finishedAt,
   };
-  await writeReport(dataDir, report);
+  logIngestSummary(report);
   return report;
 }
 
@@ -503,6 +592,8 @@ export async function ingestFolder(
 
   progress({ phase: "scan", message: `Scanning ${abs}` });
   const files = await collectFolderFiles(abs);
+  await prepareVectorIndex(db, dataDir, embedder, options.signal);
+
   let pagesOk = 0;
   let pagesFailed = 0;
   let pagesSkipped = 0;
@@ -542,6 +633,7 @@ export async function ingestFolder(
             recreate: Boolean(options.recreate),
             embedder,
             meta: { adapter },
+            onProgress: progress,
           });
           if (result === "skipped") pagesSkipped++;
           else pagesOk++;
@@ -550,6 +642,7 @@ export async function ingestFolder(
           pagesFailed++;
           const message = err instanceof Error ? err.message : String(err);
           errors.push({ uri: file.uri, error: message });
+          log.warn(`ingest page failed uri=${file.uri} error=${message}`);
           await markDocumentError(db, source.id, file.uri, message);
         }
       }),
@@ -578,7 +671,7 @@ export async function ingestFolder(
     startedAt,
     finishedAt: nowIso(),
   };
-  await writeReport(dataDir, report);
+  logIngestSummary(report);
   return report;
 }
 
@@ -612,6 +705,8 @@ export async function ingestGithub(
     strategy: "github",
     status: "indexing",
   });
+
+  await prepareVectorIndex(db, dataDir, embedder, options.signal);
 
   let pagesOk = 0;
   let pagesFailed = 0;
@@ -652,6 +747,7 @@ export async function ingestGithub(
             recreate: Boolean(options.recreate),
             embedder,
             meta: { adapter },
+            onProgress: progress,
           });
           if (result === "skipped") pagesSkipped++;
           else pagesOk++;
@@ -660,6 +756,7 @@ export async function ingestGithub(
           pagesFailed++;
           const message = err instanceof Error ? err.message : String(err);
           errors.push({ uri: file.uri, error: message });
+          log.warn(`ingest page failed uri=${file.uri} error=${message}`);
           await markDocumentError(db, source.id, file.uri, message);
         }
       }),
@@ -688,7 +785,7 @@ export async function ingestGithub(
     startedAt,
     finishedAt: nowIso(),
   };
-  await writeReport(dataDir, report);
+  logIngestSummary(report);
   return report;
 }
 
@@ -712,9 +809,4 @@ export async function ingestTarget(
     throw new Error(`Not a directory, URL, or GitHub repo: ${target}`);
   }
   return ingestFolder(db, config, dataDir, abs, options);
-}
-
-async function writeReport(dataDir: string, report: IngestReport): Promise<void> {
-  const path = join(dataDir, "last-ingest-report.json");
-  await writeFile(path, JSON.stringify(report, null, 2), "utf8");
 }

@@ -1,6 +1,6 @@
 {
   "name": "localdoc",
-  "version": "0.1.0",
+  "version": "0.1.7",
   "description": "Offline-first documentation index for AI agents",
   "license": "MIT",
   "type": "module",

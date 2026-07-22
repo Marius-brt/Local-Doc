@@ -14,7 +14,7 @@ MIT licensed. Single-file executables via Bun.
 - Default local embeddings via embedded Model2Vec Rust sidecar (`minishlab/potion-base-8M`); Transformers.js bundled for local rerank; OpenAI-compatible embeddings optional
 - Prisma migrations for the schema (FTS triggers included in SQL migrations)
 - Playwright auto-fallback for JS-heavy or blocked pages (downloaded on first use)
-- Resumable ingest with content-hash skip and ingest reports
+- Resumable ingest with content-hash skip (summaries in the log file)
 
 ## Install
 

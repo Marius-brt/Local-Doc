@@ -1,6 +1,7 @@
 import { type Client, createClient } from "@libsql/client";
 import { dbPath } from "../config/load.ts";
 import { applyPrismaMigrations } from "./migrate.ts";
+import { wrapClientWithBusyRetry } from "./retry.ts";
 
 let clientSingleton: Client | null = null;
 let clientDataDir: string | null = null;
@@ -13,8 +14,14 @@ export async function getDb(dataDir: string): Promise<Client> {
     clientSingleton.close();
   }
   const path = dbPath(dataDir);
-  const client = createClient({ url: `file:${path}` });
-  await applyPrismaMigrations(client);
+  const raw = createClient({ url: `file:${path}` });
+  await raw.executeMultiple(`
+    PRAGMA journal_mode=WAL;
+    PRAGMA busy_timeout=8000;
+    PRAGMA synchronous=NORMAL;
+  `);
+  await applyPrismaMigrations(raw);
+  const client = wrapClientWithBusyRetry(raw);
   clientSingleton = client;
   clientDataDir = dataDir;
   return client;

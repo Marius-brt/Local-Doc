@@ -1,7 +1,9 @@
 import { access, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { isUnderRoot } from "../crawl/urls.ts";
+import { formatError, log } from "../util/log.ts";
 
 type Browser = import("playwright").Browser;
 
@@ -22,15 +24,18 @@ async function exists(path: string): Promise<boolean> {
 async function drainQuiet(
   stream: ReadableStream<Uint8Array> | null | undefined,
   onLine?: (line: string) => void,
-): Promise<void> {
-  if (!stream) return;
+): Promise<string> {
+  if (!stream) return "";
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buf = "";
+  let full = "";
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    buf += decoder.decode(value, { stream: true });
+    const chunk = decoder.decode(value, { stream: true });
+    full += chunk;
+    buf += chunk;
     // Progress bars often use \r
     const parts = buf.split(/\r|\n/);
     buf = parts.pop() ?? "";
@@ -41,6 +46,18 @@ async function drainQuiet(
   }
   const tail = buf.trim();
   if (tail) onLine?.(tail.slice(0, 120));
+  return full;
+}
+
+/** Resolve the npm Playwright CLI (`cli.js`), avoiding a Python `playwright` on PATH. */
+async function resolvePlaywrightCli(): Promise<string | null> {
+  try {
+    const pkgUrl = await import.meta.resolve("playwright/package.json");
+    const pkgPath = fileURLToPath(pkgUrl);
+    return join(dirname(pkgPath), "cli.js");
+  } catch {
+    return null;
+  }
 }
 
 export async function ensurePlaywrightBrowser(
@@ -54,7 +71,19 @@ export async function ensurePlaywrightBrowser(
   const marker = join(browsersPath, ".localdoc-chromium-installed");
   if (!(await exists(marker))) {
     onProgress?.("Downloading Chromium for Playwright (one-time setup)…");
-    const proc = Bun.spawn(["bunx", "playwright", "install", "chromium"], {
+    log.info(`installing Playwright Chromium into ${browsersPath}`);
+
+    const cli = await resolvePlaywrightCli();
+    const cmd = cli
+      ? ["bun", cli, "install", "chromium"]
+      : ["bunx", "--bun", "playwright", "install", "chromium"];
+    if (!cli) {
+      log.warn(
+        "playwright package not resolvable; falling back to `bunx --bun playwright` (avoid Python playwright on PATH)",
+      );
+    }
+
+    const proc = Bun.spawn(cmd, {
       env: {
         ...process.env,
         PLAYWRIGHT_BROWSERS_PATH: browsersPath,
@@ -66,16 +95,24 @@ export async function ensurePlaywrightBrowser(
       stderr: "pipe",
     });
 
-    await Promise.all([
+    const [stdout, stderr] = await Promise.all([
       drainQuiet(proc.stdout as ReadableStream<Uint8Array>, onProgress),
       drainQuiet(proc.stderr as ReadableStream<Uint8Array>, onProgress),
     ]);
 
     const code = await proc.exited;
     if (code !== 0) {
-      throw new Error(`Failed to install Playwright Chromium (exit ${code})`);
+      const combined = `${stdout}\n${stderr}`.trim();
+      log.error(`Playwright Chromium install failed (exit ${code}): ${combined.slice(0, 2000)}`);
+      let msg = `Failed to install Playwright Chromium (exit ${code})`;
+      if (/ModuleNotFoundError|No module named ['"]playwright['"]/i.test(combined)) {
+        msg +=
+          ". A Python `playwright` CLI was likely invoked instead of the npm package — install npm playwright (`bun add playwright`) and retry, or set crawl.playwright: never.";
+      }
+      throw new Error(msg);
     }
     await Bun.write(marker, new Date().toISOString());
+    log.info("Playwright Chromium install complete");
     onProgress?.("Chromium ready");
   }
   return browsersPath;
@@ -83,24 +120,32 @@ export async function ensurePlaywrightBrowser(
 
 export async function getBrowser(dataDir: string, onProgress?: BrowserProgress): Promise<Browser> {
   if (!browserPromise) {
-    await ensurePlaywrightBrowser(dataDir, onProgress);
     browserPromise = (async () => {
-      let chromium: {
-        launch: (opts: { headless: boolean }) => Promise<Browser>;
-      };
       try {
-        const mod = await import("playwright");
-        chromium = mod.chromium;
-        if (!chromium || typeof chromium.launch !== "function") {
-          throw new Error("playwright stub");
+        await ensurePlaywrightBrowser(dataDir, onProgress);
+        let chromium: {
+          launch: (opts: { headless: boolean }) => Promise<Browser>;
+        };
+        try {
+          const mod = await import("playwright");
+          chromium = mod.chromium;
+          if (!chromium || typeof chromium.launch !== "function") {
+            throw new Error("playwright stub (no chromium.launch)");
+          }
+        } catch (err) {
+          const detail = formatError(err);
+          log.error(`playwright import failed: ${detail}`);
+          throw new Error(
+            `Playwright is not available (${detail}). Install it (\`bun add playwright\` / \`npm i -g playwright\`) or set crawl.playwright: never. Browser fallback works best when running via \`bun run localdoc\`.`,
+            { cause: err },
+          );
         }
-      } catch {
-        throw new Error(
-          "Playwright is not available. Install it (`bun add playwright` / `npm i -g playwright`) or set crawl.playwright: never. Browser fallback works best when running via `bun run localdoc`.",
-        );
+        onProgress?.("Launching headless Chromium…");
+        return await chromium.launch({ headless: true });
+      } catch (err) {
+        browserPromise = null;
+        throw err;
       }
-      onProgress?.("Launching headless Chromium…");
-      return chromium.launch({ headless: true });
     })();
   }
   return browserPromise;
@@ -197,8 +242,12 @@ export async function fetchWithPlaywright(
 
 export async function closeBrowser(): Promise<void> {
   if (browserPromise) {
-    const b = await browserPromise;
-    await b.close();
+    try {
+      const b = await browserPromise;
+      await b.close();
+    } catch {
+      // launch may have failed; still clear singleton
+    }
     browserPromise = null;
   }
 }

@@ -137,6 +137,186 @@ export function dedupeVersionedUrls(urls: string[]): string[] {
   return out;
 }
 
+/**
+ * Common docs locale path segments (`/docs/zh/...`, `/en-US/docs/...`).
+ * Excludes ambiguous tech tokens (e.g. `go`) that match ISO-looking shapes.
+ */
+const DOC_LOCALES = new Set([
+  "en",
+  "en-us",
+  "en-gb",
+  "en-au",
+  "en-ca",
+  "en-nz",
+  "en-ie",
+  "zh",
+  "zh-cn",
+  "zh-tw",
+  "zh-hk",
+  "zh-hans",
+  "zh-hant",
+  "ja",
+  "jp",
+  "ko",
+  "kr",
+  "fr",
+  "de",
+  "es",
+  "pt",
+  "pt-br",
+  "pt-pt",
+  "ru",
+  "it",
+  "nl",
+  "pl",
+  "tr",
+  "ar",
+  "he",
+  "hi",
+  "th",
+  "vi",
+  "id",
+  "ms",
+  "sv",
+  "da",
+  "fi",
+  "no",
+  "nb",
+  "nn",
+  "cs",
+  "sk",
+  "uk",
+  "ro",
+  "hu",
+  "el",
+  "bg",
+  "hr",
+  "sr",
+  "sl",
+  "lt",
+  "lv",
+  "et",
+  "fa",
+  "bn",
+  "ta",
+  "te",
+  "ca",
+  "eu",
+  "gl",
+  "af",
+  "sw",
+  "fil",
+  "tl",
+]);
+
+const ENGLISH_LOCALES = new Set(["en", "en-us", "en-gb", "en-au", "en-ca", "en-nz", "en-ie"]);
+
+/** Tech / product path segments that look like locale tags but are not. */
+const AMBIGUOUS_LOCALE_SEGMENTS = new Set(["go", "io", "js", "ts", "md", "rs", "py"]);
+
+function normalizeLocaleTag(segment: string): string {
+  return segment.replace(/_/g, "-").toLowerCase();
+}
+
+/** True when a path segment is a docs locale tag (`zh`, `en-US`, `zh_CN`). */
+export function isLocaleSegment(segment: string): boolean {
+  const tag = normalizeLocaleTag(segment);
+  if (AMBIGUOUS_LOCALE_SEGMENTS.has(tag.split("-")[0]!)) return false;
+  return DOC_LOCALES.has(tag);
+}
+
+/** Strip a single locale segment from a pathname. */
+export function stripLocalePath(pathname: string): {
+  unlocalizedPath: string;
+  locale: string | null;
+} {
+  const parts = pathname.split("/").filter(Boolean);
+  const idx = parts.findIndex((p) => isLocaleSegment(p));
+  if (idx < 0) return { unlocalizedPath: pathname || "/", locale: null };
+  const locale = parts[idx]!;
+  const rest = [...parts.slice(0, idx), ...parts.slice(idx + 1)];
+  return {
+    unlocalizedPath: rest.length ? `/${rest.join("/")}` : "/",
+    locale,
+  };
+}
+
+function unlocalizedKey(url: string): string {
+  const u = new URL(normalizeUrl(url));
+  const { unlocalizedPath } = stripLocalePath(u.pathname);
+  u.pathname = unlocalizedPath;
+  return u.toString();
+}
+
+/** Lower is better: unlocalized > English locale > other locales. */
+function localePreference(url: string): number {
+  try {
+    const { locale } = stripLocalePath(new URL(normalizeUrl(url)).pathname);
+    if (locale == null) return 0;
+    if (ENGLISH_LOCALES.has(normalizeLocaleTag(locale))) return 1;
+    return 2;
+  } catch {
+    return 2;
+  }
+}
+
+/**
+ * Prefer English / unlocalized docs URLs when the same page also exists under
+ * `/docs/:lang/...` (or `/:lang/docs/...`) in the discovery set.
+ */
+export function dedupeLocalizedUrls(urls: string[]): string[] {
+  const normalized = [
+    ...new Set(
+      urls.map((u) => {
+        try {
+          return normalizeUrl(u);
+        } catch {
+          return u;
+        }
+      }),
+    ),
+  ];
+
+  const groups = new Map<string, string[]>();
+  for (const url of normalized) {
+    let key: string;
+    try {
+      key = unlocalizedKey(url);
+    } catch {
+      key = url;
+    }
+    const list = groups.get(key) ?? [];
+    list.push(url);
+    groups.set(key, list);
+  }
+
+  const out: string[] = [];
+  for (const [, group] of groups) {
+    if (group.length === 1) {
+      out.push(group[0]!);
+      continue;
+    }
+    let best = Number.POSITIVE_INFINITY;
+    for (const u of group) best = Math.min(best, localePreference(u));
+    const preferred = group.filter((u) => localePreference(u) === best);
+    // Stable: shortest path among equally preferred (unlocalized beats /en/...).
+    preferred.sort((a, b) => {
+      try {
+        return new URL(a).pathname.length - new URL(b).pathname.length;
+      } catch {
+        return a.length - b.length;
+      }
+    });
+    out.push(preferred[0]!);
+  }
+  return out;
+}
+
+/** True when the URL path embeds a non-English docs locale segment. */
+export function isNonEnglishLocaleUrl(url: string): boolean {
+  return localePreference(url) >= 2;
+}
+
 export function filterUrlsForRoot(urls: string[], root: string): string[] {
   return urls.filter((u) => {
     try {

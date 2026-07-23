@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { VERSION } from "../version.ts";
 import add from "./commands/add.ts";
 import doctor from "./commands/doctor.ts";
 import fetchCmd from "./commands/fetch.ts";
@@ -16,7 +17,7 @@ import update from "./commands/update.ts";
 const main = defineCommand({
   meta: {
     name: "localdoc",
-    version: "0.1.0",
+    version: VERSION,
     description: "Offline-first documentation index for AI agents",
   },
   subCommands: {

@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { extractPage } from "../src/crawl/adapters/index.ts";
 import {
+  dedupeLocalizedUrls,
   dedupeVersionedUrls,
   filterUrlsForRoot,
+  isLocaleSegment,
+  isNonEnglishLocaleUrl,
   isSameOrigin,
   isSkippableContentType,
   isUnderRoot,
   normalizeUrl,
+  stripLocalePath,
   stripVersionPath,
   urlInFetchScope,
 } from "../src/crawl/urls.ts";
@@ -134,6 +138,47 @@ describe("url helpers", () => {
   test("stripVersionPath", () => {
     expect(stripVersionPath("/docs/v0.26.4/python_api").unversionedPath).toBe("/docs/python_api");
     expect(stripVersionPath("/docs/v0.26.4/python_api").version).toBe("v0.26.4");
+  });
+
+  test("stripLocalePath and isLocaleSegment", () => {
+    expect(stripLocalePath("/docs/zh/guide").unlocalizedPath).toBe("/docs/guide");
+    expect(stripLocalePath("/docs/zh/guide").locale).toBe("zh");
+    expect(stripLocalePath("/en-US/docs/guide").locale).toBe("en-US");
+    expect(stripLocalePath("/docs/guide").locale).toBe(null);
+    expect(isLocaleSegment("zh-CN")).toBe(true);
+    expect(isLocaleSegment("go")).toBe(false);
+    expect(isLocaleSegment("api")).toBe(false);
+  });
+
+  test("dedupeLocalizedUrls prefers English / unlocalized", () => {
+    const out = dedupeLocalizedUrls([
+      "https://ex.com/docs/guide",
+      "https://ex.com/docs/zh/guide",
+      "https://ex.com/docs/ja/guide",
+      "https://ex.com/docs/fr/install",
+      "https://ex.com/docs/install",
+      "https://ex.com/docs/en/other",
+      "https://ex.com/docs/other",
+    ]);
+    expect(out).toContain("https://ex.com/docs/guide");
+    expect(out).toContain("https://ex.com/docs/install");
+    expect(out).toContain("https://ex.com/docs/other");
+    expect(out.some((u) => u.includes("/zh/"))).toBe(false);
+    expect(out.some((u) => u.includes("/ja/"))).toBe(false);
+    expect(out.some((u) => u.includes("/fr/"))).toBe(false);
+    expect(out.some((u) => u.includes("/en/"))).toBe(false);
+  });
+
+  test("dedupeLocalizedUrls keeps sole non-English page", () => {
+    const out = dedupeLocalizedUrls(["https://ex.com/docs/zh/only-here"]);
+    expect(out).toEqual(["https://ex.com/docs/zh/only-here"]);
+  });
+
+  test("isNonEnglishLocaleUrl", () => {
+    expect(isNonEnglishLocaleUrl("https://ex.com/docs/zh/guide")).toBe(true);
+    expect(isNonEnglishLocaleUrl("https://ex.com/docs/guide")).toBe(false);
+    expect(isNonEnglishLocaleUrl("https://ex.com/docs/en/guide")).toBe(false);
+    expect(isNonEnglishLocaleUrl("https://ex.com/docs/go/packages")).toBe(false);
   });
 
   test("isSkippableContentType", () => {

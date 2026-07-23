@@ -242,9 +242,16 @@ async function vectorSearch(
   filters: SearchFilters | undefined,
   modelId: string | null,
 ): Promise<SearchHit[]> {
-  const filter = buildFilterSql(filters, "c", { includeKeywords: true });
   const filtering = hasSearchFilters(filters);
-  const overFetchSteps = filtering ? [5, 10, 20, 40] : [1];
+  // libSQL `vector_top_k` + SQL predicates on `chunks` (especially source_id) is
+  // pathologically slow — tens of seconds per call when the filter starves ANN.
+  // Source-scoped queries: skip ANN and score that subset directly (milliseconds).
+  if ((filters?.sourceIds?.length ?? 0) > 0) {
+    return bruteForceVectorSearch(db, queryVec, limit, filters, modelId);
+  }
+
+  // kinds/keywords: ANN without SQL chunk filters, post-filter in JS, then escalate.
+  const overFetchSteps = filtering ? [5, 10, 20] : [1];
 
   for (const mult of overFetchSteps) {
     const candidateLimit = Math.max(limit * mult, limit);
@@ -256,12 +263,11 @@ async function vectorSearch(
           JOIN chunk_embeddings e ON e.rowid = v.rowid
           JOIN chunks c ON c.id = e.chunk_id
           JOIN documents d ON d.id = c.document_id
-          WHERE 1=1${filter.sql}${DOC_OK}
+          WHERE 1=1${DOC_OK}
         `,
         args: [
           Buffer.from(queryVec.buffer, queryVec.byteOffset, queryVec.byteLength),
           candidateLimit,
-          ...filter.args,
         ],
       });
 
@@ -289,7 +295,7 @@ async function vectorSearch(
     }
   }
 
-  return bruteForceVectorSearch(db, queryVec, limit, filters, modelId);
+  return filtering ? bruteForceVectorSearch(db, queryVec, limit, filters, modelId) : [];
 }
 
 /** Cap how many chunks from the same document appear in the ranked list. */
@@ -340,6 +346,10 @@ export async function hybridSearch(
   let ranked: RankedHit[] = [...fused.values()]
     .map(({ hit, score }) => ({ ...hit, score }))
     .sort((a, b) => b.score - a.score);
+
+  // Cap before rerank — fused lists can be fts_limit+vector_limit (~80) docs.
+  const rerankCap = Math.max(config.search.top_k * 3, config.search.vector_limit);
+  ranked = ranked.slice(0, rerankCap);
 
   if (config.rerank.enabled && config.rerank.provider !== "none") {
     try {

@@ -3,8 +3,10 @@ import robotsParser from "robots-parser";
 import type { LocaldocConfig } from "../config/schema.ts";
 import { fetchOptional, fetchText } from "./fetch.ts";
 import {
+  dedupeLocalizedUrls,
   dedupeVersionedUrls,
   filterUrlsForRoot,
+  isNonEnglishLocaleUrl,
   isSameOrigin,
   isUnderRoot,
   normalizeUrl,
@@ -225,7 +227,9 @@ async function discoverNavCrawl(
     }
     if (!isUnderRoot(finalUrl, rootNorm)) continue;
     results.push(finalUrl);
-    const links = extractNavLinks(res.body, finalUrl).filter((l) => isUnderRoot(l, rootNorm));
+    const links = extractNavLinks(res.body, finalUrl).filter(
+      (l) => isUnderRoot(l, rootNorm) && !isNonEnglishLocaleUrl(l),
+    );
     for (const link of links) {
       if (!seen.has(link) && results.length + queue.length < config.crawl.max_pages * 2) {
         queue.push(link);
@@ -280,6 +284,7 @@ export async function discoverUrls(
       let filtered = robots ? urls.filter((u) => robots.isAllowed(u)) : urls;
       filtered = filterUrlsForRoot(filtered, root);
       filtered = dedupeVersionedUrls(filtered);
+      filtered = dedupeLocalizedUrls(filtered);
       if (strategy === "llms-full.txt") {
         filtered = filtered.filter((u) => !isLlmsFullCompanionUrl(u));
       }

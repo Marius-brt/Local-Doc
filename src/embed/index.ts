@@ -249,11 +249,14 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
         );
         const t0 = Date.now();
         try {
+          // Connection failures should fail fast — default maxRetries=2 triples
+          // query latency when the local embedding server is down.
           if (batch.length === 1) {
             const { embedding } = await aiEmbed({
               model,
               value: batch[0]!,
               abortSignal,
+              maxRetries: 1,
             });
             dims = embedding.length;
             out[start] = Float32Array.from(embedding);
@@ -262,6 +265,7 @@ function createOpenAIEmbedder(config: LocaldocConfig): Embedder {
               model,
               values: batch,
               abortSignal,
+              maxRetries: 1,
             });
             for (let j = 0; j < embeddings.length; j++) {
               const embedding = embeddings[j]!;
